@@ -4,6 +4,12 @@
 #
 # RTSP is reachable on the camera VLAN (Scrypted, CT 302) and needs the relay
 # login (RELAY_USER / RELAY_PASS); the API stays on loopback.
+#
+# The streams module's warnings print the full camera URL, password included,
+# so only errors are logged there. Camera dropouts still show up as pipeline
+# restarts in the proxy logs.
+log:
+  streams: error
 api:
   listen: "127.0.0.1:1984"
 rtsp:
