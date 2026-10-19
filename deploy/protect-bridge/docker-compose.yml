@@ -214,6 +214,13 @@ services:
       - --lo-scale
       - --lo-decode
       - cpu
+      # Trial 2026-10-19: restart a stalled stream after 15 s, not 45 s, to
+      # shorten the gaps the garage link causes (each restart is a "Stream
+      # recovery" event in Protect). Revisit after the garage fiber.
+      - --stream-silence-limit
+      - "15"
+      - --stream-watchdog-interval
+      - "5"
       - --lo-width
       - "1920"
       - --lo-height

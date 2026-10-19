@@ -234,6 +234,20 @@ class UnifiCamBase(metaclass=ABCMeta):
             " scales) the source: qsv on the iGPU, or cpu",
         )
         parser.add_argument(
+            "--stream-silence-limit",
+            default=None,
+            type=float,
+            help="Seconds a stream may produce no output before the watchdog"
+            " restarts it (default 45)",
+        )
+        parser.add_argument(
+            "--stream-watchdog-interval",
+            default=None,
+            type=float,
+            help="Seconds between watchdog checks (default 15; keep it at a"
+            " third of --stream-silence-limit or less)",
+        )
+        parser.add_argument(
             "--lo-decode-threads",
             default=2,
             type=int,
@@ -2002,14 +2016,28 @@ class UnifiCamBase(metaclass=ABCMeta):
     # (ffmpeg starved) or an NVR that dropped the FLV socket (nc gone). Both
     # silently stop recording. The watchdog restarts a stream that produces
     # no output for STREAM_SILENCE_LIMIT_SEC, or exited outright.
+    # Defaults; --stream-silence-limit / --stream-watchdog-interval override
+    # them per camera. Every restart is a gap and a "Stream recovery" event in
+    # Protect, so a camera on a lossy link can trade a shorter gap for the risk
+    # of restarting a stream that was only briefly slow.
     STREAM_WATCHDOG_INTERVAL_SEC = 15
     STREAM_SILENCE_LIMIT_SEC = 45
+
+    def _silence_limit(self) -> float:
+        return getattr(self.args, "stream_silence_limit", None) or (
+            self.STREAM_SILENCE_LIMIT_SEC
+        )
+
+    def _watchdog_interval(self) -> float:
+        return getattr(self.args, "stream_watchdog_interval", None) or (
+            self.STREAM_WATCHDOG_INTERVAL_SEC
+        )
 
     async def _watch_streams(self) -> None:
         progress: dict[str, tuple[int, float]] = {}
         try:
             while True:
-                await asyncio.sleep(self.STREAM_WATCHDOG_INTERVAL_SEC)
+                await asyncio.sleep(self._watchdog_interval())
                 try:
                     await self._watchdog_tick(progress)
                 except Exception:
@@ -2040,7 +2068,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                 progress[stream_index] = (produced, now)
                 continue
             silent_for = now - prev[1]
-            if silent_for >= self.STREAM_SILENCE_LIMIT_SEC:
+            if silent_for >= self._silence_limit():
                 self.logger.warning(
                     f"Stream {stream_index} produced no output for"
                     f" {int(silent_for)}s; forcing restart"

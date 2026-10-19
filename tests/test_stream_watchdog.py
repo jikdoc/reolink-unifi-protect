@@ -218,3 +218,23 @@ def test_close_streams_tolerates_handle_removal(cert, monkeypatch):
         cam._ffmpeg_handles[i] = FakeHandle(pid=1)
     cam.close_streams()  # must not raise "dict changed size during iteration"
     assert cam._ffmpeg_handles == {}
+
+
+async def test_silence_limit_can_be_shortened_per_camera(cam, monkeypatch):
+    # A lossy link: restart after 15 s instead of 45 s, checked every 5 s.
+    cam.args.stream_silence_limit = 15.0
+    cam.args.stream_watchdog_interval = 5.0
+    assert cam._watchdog_interval() == 5.0
+    idx = arm(cam, bytes_out=1000)
+    monkeypatch.setattr(cam, "_stream_output_bytes", lambda i: cam._output.get(i))
+    progress = {}
+    await cam._watchdog_tick(progress, now=0.0)
+    await cam._watchdog_tick(progress, now=10.0)
+    assert cam._test_calls["stop"] == []
+    await cam._watchdog_tick(progress, now=15.0)
+    assert cam._test_calls["stop"] == [idx]
+
+
+def test_watchdog_defaults_are_unchanged(cam):
+    assert cam._silence_limit() == 45
+    assert cam._watchdog_interval() == 15
