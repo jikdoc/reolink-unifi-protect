@@ -1,0 +1,120 @@
+# Homelab pilot: Reolink Elite Sophia (Elite Floodlight WiFi, firmware v3.2.0.5607)
+# -> UniFi Protect 7.3.70 on the UNVR, from CT 318 "protect-bridge" on pvemed.
+#
+# Measured on the camera (GetEnc, 2026-10-19):
+#   main: H.265 5120x1552 @ 20 fps -> video1, passed through untouched
+#   sub:  H.264 1920x576  @ 20 fps -> video2/3, QSV-transcoded to H.265 on the
+#         i7-12700 iGPU (enhanced encoding makes Protect expect HEVC everywhere)
+# The camera serves its API on plain HTTP only (HTTPS off), and rejects
+# user/password-in-URL logins because the password has special characters, so
+# this uses --reolink-scheme http and --reolink-snapshot (token login).
+#
+# Secrets live only in ./.env next to this file (gitignored, mode 600):
+#   NVR_IP, ADOPTION_TOKEN, CAM_MAC, CAM_IP, CAM_NAME, CAM_USER,
+#   CAM_PASS      raw password, single-quoted in .env so compose leaves $ alone
+#   CAM_PASS_URL  the same password percent-encoded, for the RTSP URLs
+# and ./client.pem (see the README quickstart).
+#
+# Protect caches model/codec/resolution at ADOPTION. Changing any of those flags
+# means: remove the camera in Protect, put a fresh token in .env (tokens live
+# ~60 min), then `docker compose up -d --force-recreate`.
+#
+# Never adopt the camera twice: remove its third-party adoption in Protect and
+# exclude it in onvif-recorder before this goes up.
+#
+#   cd /opt/rup/deploy/protect-bridge && docker compose up -d --build
+services:
+  elite-sophia:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.vaapi
+    image: protect-bridge:pinned
+    container_name: protect-bridge-elite-sophia
+    restart: unless-stopped
+    # Host networking: the proxy only connects out (to Protect on 7442 and the
+    # camera); the bundled sidecar's sink stays on loopback.
+    network_mode: host
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    volumes:
+      - ./client.pem:/client.pem:ro
+      # Bounded scratch space for snapshots and crops; a restart wipes it.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 536870912 # 512 MiB
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${ADOPTION_TOKEN}"
+      - --mac
+      - "${CAM_MAC}"
+      - --ip
+      - "${CAM_IP}"
+      - --name
+      - "${CAM_NAME}"
+      # Full UVC G5 Pro identity (unlocks Protect's H.265 capability gate);
+      # values from the upstream reference compose.
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.4.132"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${CAM_USER}:${CAM_PASS_URL}@${CAM_IP}:554/h264Preview_01_main"
+      - "rtsp://${CAM_USER}:${CAM_PASS_URL}@${CAM_IP}:554/h264Preview_01_sub"
+      - --reolink-ai-host
+      - "${CAM_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      # Snapshots and per-object crops over the token login, not a 4th RTSP
+      # session (Wi-Fi Reolinks cap concurrent sessions).
+      - --reolink-snapshot
+      # Person/vehicle/animal from the camera's own AI over Baichuan push
+      # (port 9000); no HTTP polling.
+      - --reolink-push-ai
+      # Real moving boxes, read only while a detection is in progress. The
+      # Floodlight carries them on the sub stream.
+      - --ai-sidecar
+      - --ai-sidecar-profile
+      - sub
+      - --ffmpeg-args
+      - "-c:v copy -c:a copy"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "5120"
+      - --hi-height
+      - "1552"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "576"
+      - --lo-fps
+      - "20"

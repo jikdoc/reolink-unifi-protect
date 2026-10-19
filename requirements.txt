@@ -3,7 +3,7 @@ amcrest
 asyncio-mqtt
 backoff
 coloredlogs
-flvlib3@https://github.com/zkonge/flvlib3/archive/master.zip
+flvlib3@https://github.com/zkonge/flvlib3/archive/5f7ba118afb25da3b2053fe8caa3e0e0eefe7c07.zip
 hikvisionapi>=0.3.2
 semver
 packaging

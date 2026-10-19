@@ -1,0 +1,56 @@
+# Exact versions resolved by the 2026-10-19 build of Dockerfile.vaapi (pip freeze),
+# used as pip constraints so a rebuild installs the same code. Regenerate on purpose:
+#   docker run --rm --entrypoint /opt/venv/bin/pip <image> freeze
+# flvlib3 is pinned to a commit in requirements.txt (constraints cannot hold URLs).
+aiofiles==25.1.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.5
+aiortsp==1.4.0
+aiosignal==1.4.0
+aiozoneinfo==0.2.3
+amcrest==1.9.9
+annotated-types==0.8.0
+anyio==4.15.1
+argcomplete==3.7.2
+asyncio-mqtt==0.16.2
+attrs==26.1.0
+av==19.0.1
+backoff==2.2.1
+certifi==2026.10.18
+charset-normalizer==3.5.2
+coloredlogs==15.0.1
+convertertools==1.1.0
+dpkt==1.9.8
+frozenlist==1.8.0
+h11==0.16.0
+hikvisionapi==0.3.2
+httpcore==1.0.9
+httpx==0.28.1
+humanfriendly==10.0
+idna==3.20
+maturin==1.15.0
+multidict==7.1.0
+orjson==3.13.0
+packaging==26.3
+paho-mqtt==2.1.0
+platformdirs==4.13.5
+propcache==0.5.4
+pycryptodomex==3.24.1
+pydantic==2.14.1
+pydantic_core==2.50.1
+PySocks==1.7.1
+PyYAML==5.3.1
+reolink_aio==0.21.18
+reolinkapi==0.1.5
+requests==2.34.2
+semver==3.1.0
+setuptools==84.0.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.5
+uiprotect==23.7.1
+urllib3==2.8.0
+websockets==12.0
+wheel==0.48.0
+xmltodict==1.0.4
+yarl==1.25.1
