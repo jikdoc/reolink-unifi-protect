@@ -39,9 +39,9 @@ pycryptodomex==3.24.1
 pydantic==2.14.1
 pydantic_core==2.50.1
 PySocks==1.7.1
-PyYAML==5.3.1
+PyYAML==6.0.2
 reolink_aio==0.21.18
-reolinkapi==0.1.5
+reolinkapi==0.4.1
 requests==2.34.2
 semver==3.1.0
 setuptools==84.0.0
