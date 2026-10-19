@@ -20,7 +20,9 @@
 #
 # Protect caches model/codec/resolution at ADOPTION. Changing any of those flags
 # means: remove the camera in Protect, put a fresh token in .env (tokens live
-# ~60 min), then `docker compose up -d --force-recreate <service>`.
+# ~60 min), then `docker compose up -d --no-deps --force-recreate <service>`.
+# Always --no-deps when touching one camera: without it compose also recreates
+# the relay and every other camera's feed drops (seen 2026-10-19).
 #
 # Never adopt a camera twice: remove its third-party adoption in Protect and
 # exclude its MAC (and the virtual MAC) in onvif-recorder first.
