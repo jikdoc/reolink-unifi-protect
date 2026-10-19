@@ -114,8 +114,13 @@ services:
       - http
       - --reolink-snapshot
       - --reolink-push-ai
+      # ffmpeg 7.1 stalls on copied Reolink audio (the muxer holds all video
+      # for 10 s and Protect times out): re-encode it, 16 kHz mono as the
+      # camera sends it, on every channel.
       - --ffmpeg-args
-      - "-c:v copy -c:a copy"
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
       - h265
       - --hi-width
@@ -177,8 +182,13 @@ services:
       - http
       - --reolink-snapshot
       - --reolink-push-ai
+      # ffmpeg 7.1 stalls on copied Reolink audio (the muxer holds all video
+      # for 10 s and Protect times out): re-encode it, 16 kHz mono as the
+      # camera sends it, on every channel.
       - --ffmpeg-args
-      - "-c:v copy -c:a copy"
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
       - h265
       - --hi-width
