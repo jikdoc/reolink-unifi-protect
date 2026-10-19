@@ -219,6 +219,26 @@ class UnifiCamBase(metaclass=ABCMeta):
             " --lo-width x --lo-height on the iGPU, so all channels can come"
             " from the camera's main stream (one stream from the camera)",
         )
+        # On pvemed (i7-12700 UHD 770) the QSV HEVC *decoder* hung the GPU on
+        # Reolink 5120x1552 / 4096x1536 main streams within minutes, on both the
+        # xe and i915 drivers ("GPU HANG ... in dec0:0:hevc_qsv"). Each hang
+        # resets the engine for every container sharing the iGPU, and ffmpeg
+        # never recovers (GPU Hang (-21) forever). cpu decodes and scales in
+        # software (~20 ms/frame at 5120x1552, 2 threads) and only uploads the
+        # small lo frame for the hevc_qsv encode.
+        parser.add_argument(
+            "--lo-decode",
+            default="qsv",
+            choices=["qsv", "cpu"],
+            help="Where --lo-h265-transcode decodes (and, with --lo-scale,"
+            " scales) the source: qsv on the iGPU, or cpu",
+        )
+        parser.add_argument(
+            "--lo-decode-threads",
+            default=2,
+            type=int,
+            help="Decoder threads per lo channel with --lo-decode cpu",
+        )
 
     async def _run(self, ws) -> None:
         self._session = ws
@@ -302,6 +322,36 @@ class UnifiCamBase(metaclass=ABCMeta):
             "video3",
         )
 
+    def _lo_cpu_decoding(self, stream_index: str = "") -> bool:
+        return (
+            self._lo_h265_transcoding(stream_index)
+            and getattr(self.args, "lo_decode", "qsv") == "cpu"
+        )
+
+    def _decode_prefix(self, stream_index: str = "") -> str:
+        # Pre-input (decode) slot.
+        if self._lo_cpu_decoding(stream_index):
+            # No -hwaccel: decode in software. The QSV device exists only
+            # for the encoder (hwupload in the filter chain), derived from
+            # VAAPI on the render node.
+            dev = self.args.hw_device
+            threads = getattr(self.args, "lo_decode_threads", 2)
+            return (
+                f"-init_hw_device vaapi=va:{dev} -init_hw_device qsv=hw@va"
+                f" -filter_hw_device hw -threads {threads} "
+            )
+        if self._hw_transcoding(stream_index) or self._lo_h265_transcoding(
+            stream_index
+        ):
+            # Hardware-decode HEVC on the iGPU via QSV so frames stay on the
+            # GPU for vpp_qsv + h264_qsv (no CPU round-trip).
+            # NOTE: do NOT pin `-c:v hevc_qsv` here. The hi source is HEVC, but
+            # if this stream ever carries H.264 (e.g. a sub-stream fallback),
+            # forcing the HEVC decoder fails with "Function not implemented".
+            # `-hwaccel qsv` alone lets ffmpeg pick the right QSV decoder.
+            return f"-hwaccel qsv -qsv_device {self.args.hw_device} "
+        return ""
+
     def _emits_h265(self, stream_index: str = "") -> bool:
         # Channels whose FLV output carries HEVC and therefore needs the
         # unifi.hevc_flv rewrite before clock_sync.
@@ -335,11 +385,21 @@ class UnifiCamBase(metaclass=ABCMeta):
             # --lo-scale: the lo channels are cut from the main stream, so the
             # camera is only ever asked for one stream (Wi-Fi cameras cannot
             # carry main and sub at once); vpp_qsv scales on the iGPU.
-            scale = (
-                f'-vf "vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}" '
-                if getattr(self.args, "lo_scale", False)
-                else ""
-            )
+            if self._lo_cpu_decoding(stream_index):
+                # Software frames: scale on the CPU (if asked), then hand
+                # them to the QSV encoder through the -filter_hw_device.
+                cpu_scale = (
+                    f"scale={self.args.lo_width}:{self.args.lo_height},"
+                    if getattr(self.args, "lo_scale", False)
+                    else ""
+                )
+                scale = f'-vf "{cpu_scale}format=nv12,hwupload=extra_hw_frames=16" '
+            elif getattr(self.args, "lo_scale", False):
+                scale = (
+                    f'-vf "vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}" '
+                )
+            else:
+                scale = ""
             audio = getattr(self.args, "lo_audio_args", None) or "-c:a copy"
             return (
                 f"{scale}-c:v hevc_qsv -b:v {self.args.lo_transcode_bitrate}"
@@ -1860,18 +1920,7 @@ class UnifiCamBase(metaclass=ABCMeta):
         except subprocess.CalledProcessError:
             self.logger.exception("Could not check for ffmpeg options")
 
-        # Pre-input (decode) slot: hardware-decode HEVC on the iGPU via QSV so
-        # frames stay on the GPU for vpp_qsv + h264_qsv (no CPU round-trip).
-        prefix = ""
-        if self._hw_transcoding(stream_index) or self._lo_h265_transcoding(
-            stream_index
-        ):
-            # NOTE: do NOT pin `-c:v hevc_qsv` here. The hi source is HEVC, but
-            # if this stream ever carries H.264 (e.g. a sub-stream fallback),
-            # forcing the HEVC decoder fails with "Function not implemented".
-            # `-hwaccel qsv` alone lets ffmpeg pick the right QSV decoder.
-            prefix = f"-hwaccel qsv -qsv_device {self.args.hw_device} "
-        return prefix + " ".join(base_args)
+        return self._decode_prefix(stream_index) + " ".join(base_args)
 
     async def start_video_stream(
         self, stream_index: str, stream_name: str, destination: tuple[str, int]

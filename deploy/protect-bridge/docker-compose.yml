@@ -3,8 +3,12 @@
 #
 # ONE STREAM PER CAMERA (house rule): the relay (go2rtc) pulls each camera's
 # MAIN stream once; every Protect channel reads from the relay. video1 passes
-# the main stream through untouched (H.265); video2/3 are cut from it on the
-# i7-12700 iGPU (--lo-h265-transcode --lo-scale). The camera's sub stream is
+# the main stream through untouched (H.265); video2/3 are cut from it
+# (--lo-h265-transcode --lo-scale): decoded and scaled on the CPU
+# (--lo-decode cpu, ~0.4 core per camera) and only encoded on the i7-12700 iGPU,
+# because the iGPU's HEVC decoder hung on these streams (2026-10-19, on both
+# the xe and i915 drivers). To try the iGPU again (e.g. after the garage fiber),
+# drop --lo-decode cpu and watch `dmesg | grep "GPU HANG"` on pvemed. The camera's sub stream is
 # never used. Measured 2026-10-19 on Wi-Fi Elite Sophia: main alone 399/400
 # frames, main + sub together only 249/400, so Protect timed out every channel.
 # The Baichuan box sidecar is off for the same reason (it opens a second video
@@ -138,6 +142,8 @@ services:
       - h265
       - --lo-h265-transcode
       - --lo-scale
+      - --lo-decode
+      - cpu
       - --lo-width
       - "1920"
       - --lo-height
@@ -206,6 +212,8 @@ services:
       - h265
       - --lo-h265-transcode
       - --lo-scale
+      - --lo-decode
+      - cpu
       - --lo-width
       - "1920"
       - --lo-height

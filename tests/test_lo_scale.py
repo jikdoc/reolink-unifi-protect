@@ -65,3 +65,43 @@ def test_lo_audio_args_replace_the_audio_copy():
     args = cam.get_extra_ffmpeg_args("video3")
     assert args.endswith("-g 20 -ar 16000 -ac 1 -codec:a aac -b:a 32k")
     assert "-c:a copy" not in args
+
+
+# --lo-decode cpu: the QSV HEVC decoder hung the shared iGPU on the Reolink main
+# streams, so decode and scale in software and only encode on the iGPU.
+
+
+def test_lo_decode_defaults_to_qsv():
+    cam = make_cam(lo_scale=True, hw_device="/dev/dri/renderD128")
+    assert cam._decode_prefix("video3") == "-hwaccel qsv -qsv_device /dev/dri/renderD128 "
+
+
+def test_lo_decode_cpu_scales_in_software_and_uploads_for_the_encoder():
+    cam = make_cam(lo_scale=True, lo_decode="cpu")
+    for stream in ("video2", "video3"):
+        args = cam.get_extra_ffmpeg_args(stream)
+        assert args.startswith('-vf "scale=1920:576,format=nv12,hwupload=extra_hw_frames=16" ')
+        assert "vpp_qsv" not in args
+        assert "-c:v hevc_qsv -b:v 1M -g 20" in args
+
+
+def test_lo_decode_cpu_without_lo_scale_keeps_the_size():
+    args = make_cam(lo_decode="cpu").get_extra_ffmpeg_args("video3")
+    assert args.startswith('-vf "format=nv12,hwupload=extra_hw_frames=16" ')
+
+
+def test_lo_decode_cpu_drops_hwaccel_and_creates_the_encode_device():
+    cam = make_cam(lo_scale=True, lo_decode="cpu", hw_device="/dev/dri/renderD128",
+                   lo_decode_threads=2)
+    prefix = cam._decode_prefix("video3")
+    assert "-hwaccel" not in prefix
+    assert prefix == (
+        "-init_hw_device vaapi=va:/dev/dri/renderD128 -init_hw_device qsv=hw@va"
+        " -filter_hw_device hw -threads 2 "
+    )
+
+
+def test_lo_decode_cpu_leaves_the_main_channel_alone():
+    cam = make_cam(lo_scale=True, lo_decode="cpu", hw_device="/dev/dri/renderD128")
+    assert cam._decode_prefix("video1") == ""
+    assert cam.get_extra_ffmpeg_args("video1") == "-c:v copy -c:a copy"
