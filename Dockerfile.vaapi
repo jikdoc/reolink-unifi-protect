@@ -3,8 +3,8 @@
 # Hardware: UGREEN NAS, Intel Core i5-1235U (Iris Xe iGPU), Unraid 7.2.3,
 # /dev/dri/renderD128 exposed. Upstream's published image is Alpine 3.10 with
 # an ffmpeg that has VAAPI encoders compiled in but NO Intel driver, so VAAPI
-# cannot initialize there. This image builds on Ubuntu 24.04 (glibc): its
-# ffmpeg 6.1 can mux HEVC into FLV ("enhanced FLV"), which the current
+# cannot initialize there. This image builds on Debian 13 (glibc): its
+# ffmpeg 7.1 can mux HEVC into FLV ("enhanced FLV"), which the current
 # H.265-passthrough plan needs, and the Intel iHD driver + oneVPL runtime
 # keep the QSV fallback (--hw-transcode in unifi/cams/base.py) working if
 # Protect refuses the passthrough stream.
@@ -15,7 +15,10 @@
 # `--ai-sidecar` (the proxy runs it as a subprocess; see deploy/ai-sidecar and docs/PROTECT-7.3.md).
 # Homelab: base images pinned by digest, the sidecar by its lock file and the Python
 # packages by requirements.lock, so a rebuild cannot pull in different code. Apt
-# packages still come from the Debian 13 archive at build time (security updates).
+# packages come from the Debian 13 archive at build time, and `apt-get upgrade`
+# also brings the pinned base's own packages current, so rebuilding picks up every
+# Debian security fix: cd /opt/rup/deploy/protect-bridge && docker compose build
+# && docker compose up -d
 #
 # Debian 13 instead of Ubuntu 24.04: Ubuntu's iHD 24.1 / libva 1.20 fails to
 # initialise ("iHD_drv_video.so init failed") on pvemed's i7-12700 under Proxmox
@@ -37,7 +40,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # intel-media-va-driver-non-free lives in Debian's non-free component.
 RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
         /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends \
+    && apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev python3-pip \
         build-essential git pkg-config ca-certificates \
         libjpeg-dev zlib1g-dev \
