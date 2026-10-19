@@ -118,3 +118,94 @@ services:
       - "576"
       - --lo-fps
       - "20"
+
+  # Second pilot camera: Reolink OMVI 3i PoE "Back Gate" (wired, firmware
+  # v3.2.0.6905). Measured 2026-10-19: main H.265 4096x1536@20 (6 Mbps),
+  # sub H.264 1920x720@20 (1.5 Mbps). Same password as Elite Sophia, so it
+  # reuses CAM_USER/CAM_PASS/CAM_PASS_URL; BG_* hold the rest. Untested
+  # upstream model, and which stream carries the AI boxes is unknown: the
+  # sidecar starts on main.
+  back-gate:
+    image: protect-bridge:pinned
+    container_name: protect-bridge-back-gate
+    restart: unless-stopped
+    network_mode: host
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    volumes:
+      - ./client.pem:/client.pem:ro
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 536870912 # 512 MiB
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${BG_ADOPTION_TOKEN}"
+      - --mac
+      - "${BG_MAC}"
+      - --ip
+      - "${BG_IP}"
+      - --name
+      - "${BG_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.4.132"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_main"
+      - "rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_sub"
+      - --reolink-ai-host
+      - "${BG_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ai-sidecar
+      - --ai-sidecar-profile
+      - main
+      # Both bridges use host networking: each bundled sidecar needs its own
+      # loopback sink port (Elite Sophia keeps the default 8099).
+      - --ai-sink-port
+      - "8098"
+      - --ffmpeg-args
+      - "-c:v copy -c:a copy"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "4096"
+      - --hi-height
+      - "1536"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "720"
+      - --lo-fps
+      - "20"
