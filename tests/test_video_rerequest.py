@@ -10,6 +10,7 @@ tests pin the restart on re-request.
 
 import logging
 import sys
+import time
 
 import pytest
 
@@ -64,11 +65,18 @@ def cam(cert, monkeypatch):
     args = parse_args()
     cam = RTSPCam(args, logging.getLogger("test"))
     calls = []
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
 
     async def fake_start(idx, name, destination):
+        # Like the real one: a live pipeline is left as it is.
+        h = cam._ffmpeg_handles.get(idx)
+        if h is not None and h.poll() is None:
+            return
         calls.append(("start", idx, name, destination))
         cam._ffmpeg_handles[idx] = FakeHandle()
         cam._stream_meta[idx] = (name, destination)
+        cam._stream_started[idx] = clock[0]
 
     def fake_stop(idx):
         calls.append(("stop", idx))
@@ -78,7 +86,12 @@ def cam(cert, monkeypatch):
     monkeypatch.setattr(cam, "start_video_stream", fake_start)
     monkeypatch.setattr(cam, "stop_video_stream", fake_stop)
     cam._test_calls = calls
+    cam._clock = clock
     return cam
+
+
+def later(cam, seconds):
+    cam._clock[0] += seconds
 
 
 def request(stream_name, channel="video3", dest="tcp://10.0.0.6:7550?retryInterval=1"):
@@ -107,6 +120,7 @@ async def test_first_request_starts_without_stop(cam):
 
 async def test_rerequest_of_running_stream_restarts_it(cam):
     await cam.process_video_settings(request("abc"))
+    later(cam, 15)  # Protect timed out the ingest point (10 s) and asks again
     await cam.process_video_settings(request("abc"))
     assert cam._test_calls == [
         ("start", "video3", "abc", ("10.0.0.6", 7550)),
@@ -134,6 +148,39 @@ async def test_dead_pipeline_is_started_without_stop(cam):
 async def test_rerequest_only_touches_that_channel(cam):
     cam._ffmpeg_handles["video1"] = FakeHandle()
     await cam.process_video_settings(request("abc", channel="video3"))
+    later(cam, 15)
     await cam.process_video_settings(request("abc", channel="video3"))
     assert ("stop", "video1") not in cam._test_calls
     assert "video1" in cam._ffmpeg_handles
+
+
+async def test_rerequest_right_after_a_restart_keeps_fresh_pipeline(cam):
+    # The watchdog (or a previous re-request) just respawned the stream;
+    # Protect notices the drop and asks again within a few seconds. The new
+    # pipeline already is a fresh connection, so restarting it again would
+    # only kill the socket Protect is opening (observed: 6 restarts in 17 s).
+    await cam.process_video_settings(request("abc"))
+    for _ in range(3):  # re-requests 3, 6 and 9 s after the spawn
+        later(cam, 3)
+        await cam.process_video_settings(request("abc"))
+    assert [c for c in cam._test_calls if c[0] == "stop"] == []
+
+
+async def test_new_stream_name_restarts_even_within_grace(cam):
+    await cam.process_video_settings(request("old"))
+    later(cam, 2)
+    await cam.process_video_settings(request("new"))
+    assert cam._test_calls[-2:] == [
+        ("stop", "video3"),
+        ("start", "video3", "new", ("10.0.0.6", 7550)),
+    ]
+
+
+async def test_grace_is_measured_from_the_last_spawn(cam):
+    await cam.process_video_settings(request("abc"))
+    later(cam, cam.STREAM_REREQUEST_GRACE_SEC - 1)
+    await cam.process_video_settings(request("abc"))
+    assert ("stop", "video3") not in cam._test_calls
+    later(cam, 2)  # now past the grace period since the original spawn
+    await cam.process_video_settings(request("abc"))
+    assert ("stop", "video3") in cam._test_calls

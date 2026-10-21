@@ -95,6 +95,8 @@ class UnifiCamBase(metaclass=ABCMeta):
         # stream_index -> (stream_name, (host, port)); lets the
         # watchdog respawn a stream Protect isn't actively cycling.
         self._stream_meta: dict[str, tuple[str, tuple[str, int]]] = {}
+        # stream_index -> time.monotonic() of the last spawn.
+        self._stream_started: dict[str, float] = {}
         self._watchdog_task: Optional[asyncio.Task] = None
 
         # Set up ssl context for requests
@@ -1132,13 +1134,23 @@ class UnifiCamBase(metaclass=ABCMeta):
                                 # start_video_stream would leave it alone, so
                                 # Protect retries every 15 s indefinitely.
                                 # Restart it so Protect gets a fresh connection.
+                                # A pipeline spawned within Protect's own open
+                                # timeout is already a fresh connection (Protect
+                                # re-requests a few seconds after any restart),
+                                # so leave it unless the target changed;
+                                # restarting it again only feeds the loop.
                                 handle = self._ffmpeg_handles.get(k)
                                 if handle is not None and handle.poll() is None:
-                                    self.logger.info(
-                                        f"Protect re-requested {k}; restarting"
-                                        " its pipeline"
-                                    )
-                                    self.stop_video_stream(k)
+                                    dest = (host, int(port))
+                                    started = self.__dict__.get("_stream_started", {})
+                                    age = time.monotonic() - started.get(k, float("-inf"))
+                                    changed = self._stream_meta.get(k) != (stream, dest)
+                                    if changed or age >= self.STREAM_REREQUEST_GRACE_SEC:
+                                        self.logger.info(
+                                            f"Protect re-requested {k}; restarting"
+                                            " its pipeline"
+                                        )
+                                        self.stop_video_stream(k)
                                 await self.start_video_stream(
                                     k, stream, destination=(host, int(port))
                                 )
@@ -1995,6 +2007,10 @@ class UnifiCamBase(metaclass=ABCMeta):
                 shell=True,
                 start_new_session=True,
             )
+            # __dict__: tests build bare instances without __init__.
+            self.__dict__.setdefault("_stream_started", {})[
+                stream_index
+            ] = time.monotonic()
 
     def stop_video_stream(self, stream_index: str):
         handle = self._ffmpeg_handles.pop(stream_index, None)
@@ -2038,6 +2054,8 @@ class UnifiCamBase(metaclass=ABCMeta):
     # of restarting a stream that was only briefly slow.
     STREAM_WATCHDOG_INTERVAL_SEC = 15
     STREAM_SILENCE_LIMIT_SEC = 45
+    # Protect gives an ingest point 10 s to open before it re-requests.
+    STREAM_REREQUEST_GRACE_SEC = 12
 
     def _silence_limit(self) -> float:
         return getattr(self.args, "stream_silence_limit", None) or (
