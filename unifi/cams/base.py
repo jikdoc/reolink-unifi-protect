@@ -1123,6 +1123,22 @@ class UnifiCamBase(metaclass=ABCMeta):
                                 host, port = urllib.parse.urlparse(
                                     v["avSerializer"]["destinations"][0]
                                 ).netloc.split(":")
+                                # Protect only (re)requests a stream it is not
+                                # receiving: after it times out an ingest point
+                                # it drops that socket and asks again, possibly
+                                # with a new streamName. A pipeline that is
+                                # still alive keeps writing into the dead
+                                # socket (so the watchdog sees output), and
+                                # start_video_stream would leave it alone, so
+                                # Protect retries every 15 s indefinitely.
+                                # Restart it so Protect gets a fresh connection.
+                                handle = self._ffmpeg_handles.get(k)
+                                if handle is not None and handle.poll() is None:
+                                    self.logger.info(
+                                        f"Protect re-requested {k}; restarting"
+                                        " its pipeline"
+                                    )
+                                    self.stop_video_stream(k)
                                 await self.start_video_stream(
                                     k, stream, destination=(host, int(port))
                                 )
