@@ -107,7 +107,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.4.132"
+      - "5.5.31"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -141,6 +141,11 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M -low_power 1"
       - --lo-scale
       - --lo-decode
       - cpu
@@ -150,6 +155,11 @@ services:
       - "576"
       - --lo-fps
       - "20"
+      # MoCA link: shorter recording gaps per stall (default 45 s / 15 s), 2026-10-22.
+      - --stream-silence-limit
+      - "20"
+      - --stream-watchdog-interval
+      - "5"
 
   # Reolink OMVI 3i PoE "Back Gate" (wired), firmware v3.2.0.6905:
   # main H.265 4096x1536@20 (6 Mbps). Same password as Elite Sophia.
@@ -177,7 +187,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.4.132"
+      - "5.5.31"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -211,14 +221,18 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M -low_power 1"
       - --lo-scale
       - --lo-decode
       - cpu
-      # Trial 2026-10-19: restart a stalled stream after 15 s, not 45 s, to
-      # shorten the gaps the garage link causes (each restart is a "Stream
-      # recovery" event in Protect). Revisit after the garage fiber.
+      # 15 s (10-19) and 45 s (10-22) both gave ~30 restarts/h on the MoCA link;
+      # 45 s only made each gap longer. 20 s from 2026-10-22. Revisit after the fiber.
       - --stream-silence-limit
-      - "15"
+      - "20"
       - --stream-watchdog-interval
       - "5"
       - --lo-width
@@ -227,3 +241,473 @@ services:
       - "720"
       - --lo-fps
       - "20"
+
+  # Reolink TrackMix WiFi "Track MasterBed", firmware v3.0.0.5428, wide lens
+  # only: main H.265 3840x2160@25 (4 Mbps). Presented as a UVC G5 Pro so the
+  # AI Port can pair it next to the G4 Doorbell (an AI Port cannot mix UniFi
+  # and third-party cameras: "mixed_device_type"; 4K UniFi = 0.5 points).
+  # Adopted 2026-10-21 (Protect id 6ad9465e033d5a03e493fc75), paired with the AI Port.
+  # Pass-through since 2026-10-22: the H.265 main is copied untouched to all
+  # three channels (no decode/encode on CT 318); needs re-adoption on change.
+  track-masterbed:
+    <<: *proxy
+    container_name: protect-bridge-track-masterbed
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${MB_ADOPTION_TOKEN}"
+      - --mac
+      - "${MB_MAC}"
+      - --ip
+      - "${MB_IP}"
+      - --name
+      - "${MB_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_masterbed"
+      - --reolink-ai-host
+      - "${MB_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "3840"
+      - --hi-height
+      - "2160"
+      - --hi-fps
+      - "25"
+      - --lo-codec
+      - h265
+      - --lo-width
+      - "3840"
+      - --lo-height
+      - "2160"
+      - --lo-fps
+      - "25"
+
+  # Reolink Video Doorbell WiFi-W "Doorbell Deck", firmware v3.0.0.6460, used
+  # as a plain camera on the grill/seating area (no ring/talkback flags).
+  # The camera's 1920x2560 main is cut to 1536x2048 by the relay
+  # (deck_doorbell_hq) because the AI Port cannot use anything taller than 2160
+  # (snapshots/detections failed at 2560, 2026-10-21); all three channels copy it. Presented as a UVC G5 Pro for the AI Port
+  # (2K UniFi = 0.25 points); open question: the AI Port's 3840x2160 limit vs
+  # this 2560-px-tall stream. Adopted 2026-10-21 (Protect id
+  # 6ad949f0034f5a03e4941b6c) and paired with the AI Port (0.95/1.0 used).
+  deck-doorbell:
+    <<: *proxy
+    container_name: protect-bridge-deck-doorbell
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${DD_ADOPTION_TOKEN}"
+      - --mac
+      - "${DD_MAC}"
+      - --ip
+      - "${DD_IP}"
+      - --name
+      - "${DD_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/deck_doorbell_hq"
+      - --reolink-ai-host
+      - "${DD_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h264
+      - --hi-width
+      - "1536"
+      - --hi-height
+      - "2048"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h264
+      - --lo-width
+      - "1536"
+      - --lo-height
+      - "2048"
+      - --lo-fps
+      - "20"
+
+  # Reolink TrackMix WiFi "Track Annex", firmware v3.0.0.5428, wide lens only,
+  # same setup as Track Master Bed (clean path via U7 Outdoor Back, iGPU decode).
+  # Not paired with the AI Port (full). Adopted 2026-10-22 (Protect id
+  # 6ad960e6021a5a03e494c752).
+  # Pass-through since 2026-10-22: the H.265 main is copied untouched to all
+  # three channels (no decode/encode on CT 318); needs re-adoption on change.
+  track-annex:
+    <<: *proxy
+    container_name: protect-bridge-track-annex
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${TA_ADOPTION_TOKEN}"
+      - --mac
+      - "${TA_MAC}"
+      - --ip
+      - "${TA_IP}"
+      - --name
+      - "${TA_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_annex"
+      - --reolink-ai-host
+      - "${TA_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "3840"
+      - --hi-height
+      - "2160"
+      - --hi-fps
+      - "25"
+      - --lo-codec
+      - h265
+      - --lo-width
+      - "3840"
+      - --lo-height
+      - "2160"
+      - --lo-fps
+      - "25"
+
+  # Reolink E1 Zoom "E1 Forest" (clean path), main 2560x1920@20 passed through
+  # untouched on all three channels. Plain G5 Pro, no PTZ (2026-10-22 decision).
+  e1-forest:
+    <<: *proxy
+    container_name: protect-bridge-e1-forest
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${FO_ADOPTION_TOKEN}"
+      - --mac
+      - "${FO_MAC}"
+      - --ip
+      - "${FO_IP}"
+      - --name
+      - "${FO_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_forest"
+      - --reolink-ai-host
+      - "${FO_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h264
+      - --hi-width
+      - "2560"
+      - --hi-height
+      - "1920"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h264
+      - --lo-width
+      - "2560"
+      - --lo-height
+      - "1920"
+      - --lo-fps
+      - "20"
+
+  # Reolink E1 Zoom "E1 Playroom" (clean path), main 2560x1920@20 passed through
+  # untouched on all three channels. Plain G5 Pro, no PTZ (2026-10-22 decision).
+  e1-playroom:
+    <<: *proxy
+    container_name: protect-bridge-e1-playroom
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${PL_ADOPTION_TOKEN}"
+      - --mac
+      - "${PL_MAC}"
+      - --ip
+      - "${PL_IP}"
+      - --name
+      - "${PL_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_playroom"
+      - --reolink-ai-host
+      - "${PL_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h264
+      - --hi-width
+      - "2560"
+      - --hi-height
+      - "1920"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h264
+      - --lo-width
+      - "2560"
+      - --lo-height
+      - "1920"
+      - --lo-fps
+      - "20"
+
+  # Reolink E1 Outdoor Pro "E1 Server" (clean path), main H.265 3840x2160@20,
+  # iGPU decode for the lo channels like the TrackMix cameras.
+  e1-server:
+    <<: *proxy
+    container_name: protect-bridge-e1-server
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${SV_ADOPTION_TOKEN}"
+      - --mac
+      - "${SV_MAC}"
+      - --ip
+      - "${SV_IP}"
+      - --name
+      - "${SV_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_server"
+      - --reolink-ai-host
+      - "${SV_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "3840"
+      - --hi-height
+      - "2160"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M -low_power 1"
+      - --lo-decode
+      - cpu
+      - --lo-scale
+      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
+      # cameras; back on CPU decode.
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "1080"
+      - --lo-fps
+      - "20"
+
+
+  # Reolink E1 Outdoor Pro "E1 Deck Middle" (clean path), main H.265 3840x2160@20,
+  # iGPU decode for the lo channels like the TrackMix cameras.
+  e1-deck-middle:
+    <<: *proxy
+    container_name: protect-bridge-e1-deck-middle
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${DM_ADOPTION_TOKEN}"
+      - --mac
+      - "${DM_MAC}"
+      - --ip
+      - "${DM_IP}"
+      - --name
+      - "${DM_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.31"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_deck_middle"
+      - --reolink-ai-host
+      - "${DM_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "3840"
+      - --hi-height
+      - "2160"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M -low_power 1"
+      - --lo-decode
+      - cpu
+      - --lo-scale
+      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
+      # cameras; back on CPU decode.
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "1080"
+      - --lo-fps
+      - "20"
+
