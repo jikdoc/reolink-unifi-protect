@@ -613,9 +613,9 @@ services:
       - --hi-codec
       - h265
       - --hi-width
-      - "3840"
+      - "2560"
       - --hi-height
-      - "2160"
+      - "1440"
       - --hi-fps
       - "20"
       - --lo-codec
@@ -627,6 +627,8 @@ services:
       - --lo-transcode-bitrate
       - "1M"
       - --lo-low-power
+      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
+      - --lo-shared
       - --lo-decode
       - cpu
       - --lo-scale
@@ -689,9 +691,9 @@ services:
       - --hi-codec
       - h265
       - --hi-width
-      - "3840"
+      - "2560"
       - --hi-height
-      - "2160"
+      - "1440"
       - --hi-fps
       - "20"
       - --lo-codec
@@ -703,6 +705,8 @@ services:
       - --lo-transcode-bitrate
       - "1M"
       - --lo-low-power
+      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
+      - --lo-shared
       - --lo-decode
       - cpu
       - --lo-scale
