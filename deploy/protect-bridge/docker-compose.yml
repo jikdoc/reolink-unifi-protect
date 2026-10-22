@@ -145,7 +145,8 @@ services:
       # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
-      - "1M -low_power 1"
+      - "1M"
+      - --lo-low-power
       - --lo-scale
       - --lo-decode
       - cpu
@@ -225,7 +226,8 @@ services:
       # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
-      - "1M -low_power 1"
+      - "1M"
+      - --lo-low-power
       - --lo-scale
       - --lo-decode
       - cpu
@@ -623,7 +625,8 @@ services:
       # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
-      - "1M -low_power 1"
+      - "1M"
+      - --lo-low-power
       - --lo-decode
       - cpu
       - --lo-scale
@@ -698,7 +701,8 @@ services:
       # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
-      - "1M -low_power 1"
+      - "1M"
+      - --lo-low-power
       - --lo-decode
       - cpu
       - --lo-scale
