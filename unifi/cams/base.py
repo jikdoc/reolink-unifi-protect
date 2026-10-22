@@ -201,6 +201,15 @@ class UnifiCamBase(metaclass=ABCMeta):
             default="1M",
             help="Bitrate for --lo-h265-transcode",
         )
+        # VDENC (-low_power 1) runs hevc_qsv on the fixed-function encoder
+        # instead of the render engine, so the lo encodes stop competing with
+        # decode/scale work on the shared iGPU. Was passed by smuggling
+        # "-low_power 1" into --lo-transcode-bitrate.
+        parser.add_argument(
+            "--lo-low-power",
+            action="store_true",
+            help="Encode the --lo-h265-transcode channels with -low_power 1",
+        )
         parser.add_argument(
             "--lo-audio-args",
             default="-c:a copy",
@@ -417,9 +426,12 @@ class UnifiCamBase(metaclass=ABCMeta):
             else:
                 scale = ""
             audio = getattr(self.args, "lo_audio_args", None) or "-c:a copy"
+            low_power = (
+                " -low_power 1" if getattr(self.args, "lo_low_power", False) else ""
+            )
             return (
                 f"{scale}-c:v hevc_qsv -b:v {self.args.lo_transcode_bitrate}"
-                f" -g {lo_fps} {audio}"
+                f"{low_power} -g {lo_fps} {audio}"
             )
         # Post-input (encode) slot: scale + encode H.264, both on the iGPU.
         if self._hw_transcoding(stream_index):
