@@ -32,10 +32,13 @@ ffmpeg:
   # Portrait (3:4) cut for the Doorbell Deck.
   h264_sub1440p: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=1080:1440,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 2M -maxrate 3M -g 20 -bf 0
   # Doorbell Deck main cut to 1536x2048 (3:4) so it fits the AI Port 3840x2160 limit
-  # (the camera only offers 1920x2560); CPU decode, iGPU encode.
-  h264_2048p: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=1536:2048,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 4M -maxrate 5M -g 20 -bf 0
-  # Small stream for Scrypted motion detection (OpenCV/TFLite) on the H.265
-  # pass-through cameras, whose Protect RTSP share has no video.
+  # (the camera only offers 1920x2560). Its main is H.264, so it is decoded and scaled
+  # on the iGPU too (2026-10-22: 0.41 -> 0.01 core); only HEVC decode hung the iGPU.
+  # Needs #input=rtsp_vaapi so the frames arrive as VAAPI surfaces.
+  rtsp_vaapi: -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -fflags nobuffer -flags low_delay -timeout 5000000 -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i {input}
+  h264_2048p: -vf scale_vaapi=w=1536:h=2048:format=nv12 -c:v h264_vaapi -low_power 1 -b:v 4M -maxrate 5M -g 20 -bf 0
+  # Small stream for Scrypted's HomeKit view of the H.265 pass-through cameras
+  # (and its motion detection), whose Protect RTSP share has no video.
   h264_sub360: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=640:360,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 512k -maxrate 768k -g 25 -bf 0
 
 streams:
@@ -53,8 +56,8 @@ streams:
   # Reolink Video Doorbell WiFi-W (main H.264 1920x2560 portrait @20).
   deck_doorbell: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DD_IP}:554/h264Preview_01_main
   # What protect-bridge (and so the AI Port) reads for the Doorbell Deck.
-  deck_doorbell_hq: ffmpeg:deck_doorbell#video=h264_2048p#audio=copy
+  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_vaapi#video=h264_2048p#audio=copy
   # Scrypted (2026-10-22): full stream = track_masterbed / track_annex (copy),
-  # motion = these small cuts (CPU decode + iGPU low-power encode).
+  # HomeKit = these small cuts (CPU decode + iGPU low-power encode).
   track_masterbed_motion: ffmpeg:track_masterbed#video=h264_sub360
   track_annex_motion: ffmpeg:track_annex#video=h264_sub360
