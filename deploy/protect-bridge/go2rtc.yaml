@@ -46,6 +46,9 @@ ffmpeg:
 streams:
   elite_sophia: rtsp://${CAM_USER}:${CAM_PASS_URL}@${CAM_IP}:554/h264Preview_01_main
   back_gate: rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_main
+  # Back Gate H.264 sub (1920x720): source for its Protect lo channels (iGPU H.264 decode
+  # + hevc_qsv in the proxy) since 2026-10-23, instead of CPU-decoding the H.265 main.
+  back_gate_sub: rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_sub
   # TrackMix WiFi wide lens (main H.265 3840x2160@25); tele lens not relayed.
   track_masterbed: rtsp://${CAM_USER}:${CAM_PASS_URL}@${MB_IP}:554/h264Preview_01_main
   # TrackMix WiFi "Track Annex" wide lens (main H.265 3840x2160@25).

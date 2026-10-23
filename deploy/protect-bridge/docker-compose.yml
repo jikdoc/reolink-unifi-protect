@@ -197,6 +197,7 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/back_gate"
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/back_gate_sub"
       - --reolink-ai-host
       - "${BG_IP}"
       - --reolink-ai-user
@@ -231,9 +232,11 @@ services:
       - --lo-transcode-bitrate
       - "1M"
       - --lo-low-power
-      - --lo-scale
+      # 2026-10-23: video2/3 read the camera's H.264 sub (relay back_gate_sub, already
+      # 1920x720) and decode it on the iGPU (H.264 only - HEVC iGPU decode hangs);
+      # was --lo-scale + --lo-decode cpu of the H.265 main (~0.6 core).
       - --lo-decode
-      - cpu
+      - qsv
       # 15 s (10-19) and 45 s (10-22) both gave ~30 restarts/h on the MoCA link;
       # 45 s only made each gap longer. 20 s from 2026-10-22. Revisit after the fiber.
       - --stream-silence-limit
