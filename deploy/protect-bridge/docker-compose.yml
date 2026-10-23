@@ -36,6 +36,7 @@
 x-proxy: &proxy
   image: protect-bridge:pinned
   restart: unless-stopped
+  init: true  # tini reaps orphaned ffmpeg/nc/bash after pipeline restarts (zombies piled up)
   # Host networking: the proxy only connects out (Protect on 7442, the relay
   # on loopback, the camera's HTTP API and Baichuan push).
   network_mode: host
