@@ -57,7 +57,8 @@ streams:
   deck_doorbell: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DD_IP}:554/h264Preview_01_main
   # What protect-bridge (and so the AI Port) reads for the Doorbell Deck.
   deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_vaapi#video=h264_2048p#audio=copy
-  # Scrypted (2026-10-22): full stream = track_masterbed / track_annex (copy),
-  # HomeKit = these small cuts (CPU decode + iGPU low-power encode).
-  track_masterbed_motion: ffmpeg:track_masterbed#video=h264_sub360
-  track_annex_motion: ffmpeg:track_annex#video=h264_sub360
+  # Scrypted: full stream = track_masterbed / track_annex (copy). HomeKit = these:
+  # 2026-10-23 the cameras own sub stream (896x512 H.264 15fps), copied - was a
+  # CPU decode of the 4K main + h264_sub360 encode (~0.65 core each).
+  track_masterbed_motion: rtsp://${CAM_USER}:${CAM_PASS_URL}@${MB_IP}:554/h264Preview_01_sub
+  track_annex_motion: rtsp://${CAM_USER}:${CAM_PASS_URL}@${TA_IP}:554/h264Preview_01_sub
