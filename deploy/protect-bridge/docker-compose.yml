@@ -599,6 +599,7 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_server"
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_server_lo"
       - --reolink-ai-host
       - "${SV_IP}"
       - --reolink-ai-user
@@ -611,10 +612,8 @@ services:
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
-      - --lo-audio-args
-      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
-      - h265
+      - h264
       - --hi-width
       - "2560"
       - --hi-height
@@ -622,21 +621,10 @@ services:
       - --hi-fps
       - "20"
       - --lo-codec
-      - h265
-      - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
-      - --lo-transcode-bitrate
-      - "1M"
-      - --lo-low-power
-      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
-      - --lo-shared
-      - --lo-decode
-      - cpu
-      - --lo-scale
-      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
-      # cameras; back on CPU decode.
+      - h264
+      # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
+      # copy the relay's e1_server_lo (iGPU decode+scale+encode). Was --lo-h265-transcode
+      # with --lo-shared CPU decode (~0.45 core).
       - --lo-width
       - "1920"
       - --lo-height
@@ -677,6 +665,7 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_deck_middle"
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/e1_deck_middle_lo"
       - --reolink-ai-host
       - "${DM_IP}"
       - --reolink-ai-user
@@ -689,10 +678,8 @@ services:
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
-      - --lo-audio-args
-      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
-      - h265
+      - h264
       - --hi-width
       - "2560"
       - --hi-height
@@ -700,21 +687,10 @@ services:
       - --hi-fps
       - "20"
       - --lo-codec
-      - h265
-      - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
-      - --lo-transcode-bitrate
-      - "1M"
-      - --lo-low-power
-      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
-      - --lo-shared
-      - --lo-decode
-      - cpu
-      - --lo-scale
-      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
-      # cameras; back on CPU decode.
+      - h264
+      # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
+      # copy the relay's e1_deck_middle_lo (iGPU decode+scale+encode). Was --lo-h265-transcode
+      # with --lo-shared CPU decode (~0.45 core).
       - --lo-width
       - "1920"
       - --lo-height
