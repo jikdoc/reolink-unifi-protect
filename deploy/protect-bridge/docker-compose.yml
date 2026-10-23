@@ -147,6 +147,8 @@ services:
       - --lo-transcode-bitrate
       - "1M"
       - --lo-low-power
+      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
+      - --lo-shared
       - --lo-scale
       - --lo-decode
       - cpu
