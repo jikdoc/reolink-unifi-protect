@@ -110,6 +110,18 @@ def test_lo_decode_cpu_drops_hwaccel_and_creates_the_encode_device():
     )
 
 
+def test_lo_low_power_is_off_by_default():
+    assert "-low_power" not in make_cam(lo_scale=True).get_extra_ffmpeg_args("video3")
+
+
+def test_lo_low_power_puts_the_lo_encode_on_vdenc():
+    cam = make_cam(lo_scale=True, lo_decode="cpu", lo_low_power=True)
+    for stream in ("video2", "video3"):
+        args = cam.get_extra_ffmpeg_args(stream)
+        assert "-c:v hevc_qsv -b:v 1M -low_power 1 -g 20" in args
+    assert "-low_power" not in cam.get_extra_ffmpeg_args("video1")
+
+
 def test_lo_decode_cpu_leaves_the_main_channel_alone():
     cam = make_cam(lo_scale=True, lo_decode="cpu", hw_device="/dev/dri/renderD128")
     assert cam._decode_prefix("video1") == ""

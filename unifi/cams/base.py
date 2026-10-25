@@ -212,6 +212,24 @@ class UnifiCamBase(metaclass=ABCMeta):
             default="1M",
             help="Bitrate for --lo-h265-transcode",
         )
+        # VDENC (-low_power 1) runs hevc_qsv on the fixed-function encoder
+        # instead of the render engine, so the lo encodes stop competing with
+        # decode/scale work on the shared iGPU. Was passed by smuggling
+        # "-low_power 1" into --lo-transcode-bitrate.
+        parser.add_argument(
+            "--lo-low-power",
+            action="store_true",
+            help="Encode the --lo-h265-transcode channels with -low_power 1",
+        )
+        # Protect opens video2 AND video3, and each channel got its own
+        # ffmpeg, so --lo-h265-transcode decoded the main stream twice.
+        parser.add_argument(
+            "--lo-shared",
+            action="store_true",
+            help="With --lo-h265-transcode, serve video2 and video3 from ONE"
+            " ffmpeg (one decode, split, one encode per channel) instead of"
+            " one ffmpeg each",
+        )
         # On pvemed (i7-12700 UHD 770) the QSV HEVC *decoder* hung the GPU on
         # Reolink 5120x1552 / 4096x1536 main streams within minutes, on both the
         # xe and i915 drivers ("GPU HANG ... in dec0:0:hevc_qsv"). Each hang
@@ -357,6 +375,11 @@ class UnifiCamBase(metaclass=ABCMeta):
             and getattr(self.args, "lo_decode", "qsv") == "cpu"
         )
 
+    def _lo_shared(self, stream_index: str = "") -> bool:
+        return getattr(self.args, "lo_shared", False) and self._lo_h265_transcoding(
+            stream_index
+        )
+
     def _decode_prefix(self, stream_index: str = "") -> str:
         # Pre-input (decode) slot.
         if self._hw_backend() == "vaapi":
@@ -416,6 +439,40 @@ class UnifiCamBase(metaclass=ABCMeta):
             args += " -an"
         return args
 
+    def _lo_video_filter(self) -> str:
+        # The lo channels' video filter, without -vf. --lo-scale: the lo
+        # channels are cut from the main stream, so the camera is only ever
+        # asked for one stream (Wi-Fi cameras cannot carry main and sub at
+        # once). Without scaling, decode goes straight into hevc_qsv.
+        if self._lo_cpu_decoding("video2"):
+            # Software frames: scale on the CPU (if asked), then hand
+            # them to the QSV encoder through the -filter_hw_device.
+            cpu_scale = (
+                f"scale={self.args.lo_width}:{self.args.lo_height},"
+                if getattr(self.args, "lo_scale", False)
+                else ""
+            )
+            return f"{cpu_scale}format=nv12,hwupload=extra_hw_frames=16"
+        elif getattr(self.args, "lo_scale", False):
+            return f"vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}"
+        else:
+            return ""
+
+    def _lo_encode_args(self) -> str:
+        # -g = 1s keyframe cadence: hevc_qsv's default GOP is many
+        # seconds long, which forced Protect's thumbnailer to decode
+        # 8+s of video per event thumb (10-25s, queueing) — the app
+        # then falls back to a stale full-frame snapshot.
+        lo_fps = getattr(self.args, "lo_fps", None) or 30
+        low_power = " -low_power 1" if getattr(self.args, "lo_low_power", False) else ""
+        return (
+            f"-c:v hevc_qsv -b:v {self.args.lo_transcode_bitrate}"
+            f"{low_power} -g {lo_fps}"
+        )
+
+    def _lo_audio_args(self) -> str:
+        return getattr(self.args, "lo_audio_args", None) or "-c:a copy"
+
     def _extra_ffmpeg_args(self, stream_index: str = "") -> str:
         if self._hw_backend() == "vaapi":
             if self._lo_h265_transcoding(stream_index):
@@ -444,33 +501,11 @@ class UnifiCamBase(metaclass=ABCMeta):
                     " -ar 16000 -ac 1 -codec:a aac -b:a 32k"
                 )
         if self._lo_h265_transcoding(stream_index):
-            # Scaling is opt-in; a relay, not the scaler, shares camera sessions.
-            # -g = 1s keyframe cadence: hevc_qsv's default GOP is many
-            # seconds long, which forced Protect's thumbnailer to decode
-            # 8+s of video per event thumb (10-25s, queueing) — the app
-            # then falls back to a stale full-frame snapshot.
-            lo_fps = getattr(self.args, "lo_fps", None) or 30
-            # --lo-scale: the lo channels are cut from the main stream, so the
-            # camera is only ever asked for one stream (Wi-Fi cameras cannot
-            # carry main and sub at once); vpp_qsv scales on the iGPU.
-            if self._lo_cpu_decoding(stream_index):
-                # Software frames: scale on the CPU (if asked), then hand
-                # them to the QSV encoder through the -filter_hw_device.
-                cpu_scale = (
-                    f"scale={self.args.lo_width}:{self.args.lo_height},"
-                    if getattr(self.args, "lo_scale", False)
-                    else ""
-                )
-                scale = f'-vf "{cpu_scale}format=nv12,hwupload=extra_hw_frames=16" '
-            elif getattr(self.args, "lo_scale", False):
-                scale = f'-vf "vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}" '
-            else:
-                scale = ""
-            audio = getattr(self.args, "lo_audio_args", None) or "-c:a copy"
-            return (
-                f"{scale}-c:v hevc_qsv -b:v {self.args.lo_transcode_bitrate}"
-                f" -g {lo_fps} {audio}"
-            )
+            vf = self._lo_video_filter()
+            vf_str = f'-vf "{vf}" ' if vf else ""
+            audio = self._lo_audio_args()
+            encode = self._lo_encode_args()
+            return f"{vf_str}{encode} {audio}"
         # Post-input (encode) slot: scale + encode H.264, both on the iGPU.
         if self._hw_transcoding(stream_index):
             return (
@@ -2030,6 +2065,15 @@ class UnifiCamBase(metaclass=ABCMeta):
     async def start_video_stream(
         self, stream_index: str, stream_name: str, destination: tuple[str, int]
     ):
+        if self._lo_shared(stream_index):
+            self._stream_meta[stream_index] = (stream_name, destination)
+            self._lo_shared_source = await self.get_stream_source(stream_index)
+            handle = self._ffmpeg_handles.get(stream_index)
+            if handle and handle.poll() is None:
+                return
+            self._spawn_lo_shared()
+            return
+
         has_spawned = stream_index in self._ffmpeg_handles
         is_dead = has_spawned and self._ffmpeg_handles[stream_index].poll() is not None
 
@@ -2079,12 +2123,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                 stream_index
             ] = time.monotonic()
 
-    def stop_video_stream(self, stream_index: str):
-        handle = self._ffmpeg_handles.pop(stream_index, None)
-        self._stream_meta.pop(stream_index, None)
-        if handle is None:
-            return
-        self.logger.info(f"Stopping stream {stream_index}")
+    def _kill_handle(self, handle: subprocess.Popen) -> None:
         try:
             os.killpg(os.getpgid(handle.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -2092,6 +2131,140 @@ class UnifiCamBase(metaclass=ABCMeta):
                 handle.kill()
             except ProcessLookupError:
                 pass
+
+    def _lo_shared_cmd(self, channels, source: str) -> str:
+        # One input -> one decode + scale -> split -> one hevc_qsv encode and
+        # FLV per channel, each on its own fd into its own
+        # hevc_flv | clock_sync | nc tail (bash process substitution). Encode
+        # and mux stay in this one process: a relay-made lo stream copied over
+        # RTSP lost its first packet's PTS (Intel HEVC encoders flag
+        # has_b_frames=1 even with -bf 0), which the FLV muxer rejects.
+        n = len(channels)
+        scale = getattr(self.args, "lo_scale", False)
+        w, h = getattr(self.args, "lo_width", None), getattr(
+            self.args, "lo_height", None
+        )
+        if self._lo_cpu_decoding("video2"):
+            pre = f"scale={w}:{h}" if scale else "null"
+            post = "format=nv12,hwupload=extra_hw_frames=16"
+            if n == 1:
+                graph = f"[0:v]{pre},{post}[o0]"
+            else:
+                graph = f"[0:v]{pre},split=2[s0][s1];[s0]{post}[o0];[s1]{post}[o1]"
+        else:
+            # QSV decode: frames are already on the iGPU for vpp_qsv/hevc_qsv.
+            pre = f"vpp_qsv=w={w}:h={h}" if scale else "null"
+            graph = f"[0:v]{pre}[o0]" if n == 1 else f"[0:v]{pre},split=2[o0][o1]"
+
+        if getattr(self.args, "no_audio", False):
+            audio = "-an"
+        else:
+            audio = f"-map 0:a? {self._lo_audio_args()}"
+        encode = self._lo_encode_args()
+        ts = "--write-timestamps" if self._needs_flv_timestamps else ""
+        hevc_filter = f"{sys.executable} -m unifi.hevc_flv | "
+
+        parts = [
+            "ffmpeg -nostdin -loglevel error -y",
+            self.get_base_ffmpeg_args("video2"),
+            f"-rtsp_transport {self.args.rtsp_transport}",
+            f"-i {shlex.quote(source)}",
+            f'-filter_complex "{graph}"',
+        ]
+        for i, (_, stream_name, _) in enumerate(channels):
+            parts.append(
+                f'-map "[o{i}]" {audio} {encode}'
+                f" -metadata streamName={stream_name} -f flv pipe:{3 + i}"
+            )
+        for i, (_, _, (host, port)) in enumerate(channels):
+            parts.append(
+                f"{3 + i}> >({hevc_filter}{sys.executable} -m unifi.clock_sync"
+                f" {ts} | nc {host} {port})"
+            )
+        return " ".join(parts)
+
+    def _spawn_lo_shared(self) -> None:
+        lo_indices = ["video2", "video3"]
+        channels = []
+        for idx in lo_indices:
+            meta = self._stream_meta.get(idx)
+            if meta:
+                channels.append((idx, meta[0], meta[1]))
+
+        if not channels:
+            return
+
+        # Kill existing handles for these indices
+        handles_to_kill = set()
+        for idx in lo_indices:
+            h = self._ffmpeg_handles.get(idx)
+            if h and h.poll() is None:
+                handles_to_kill.add(h)
+
+        for h in handles_to_kill:
+            self._kill_handle(h)
+
+        source = getattr(self, "_lo_shared_source", None)
+        if not source:
+            return
+
+        cmd = self._lo_shared_cmd(channels, source)
+        names = ", ".join(c[1] for c in channels)
+        indices = "+".join(c[0] for c in channels)
+        self.logger.info(
+            f"Spawning ffmpeg for {indices} ({names}): {self.redact_secrets(cmd)}"
+        )
+
+        handle = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            shell=True,
+            executable="/bin/bash",
+            start_new_session=True,
+        )
+
+        for idx, _, _ in channels:
+            self._ffmpeg_handles[idx] = handle
+            self.__dict__.setdefault("_stream_started", {})[idx] = time.monotonic()
+
+    def _respawn_lo_peers(self) -> None:
+        lo_indices = ["video2", "video3"]
+        needs_respawn = False
+        for idx in lo_indices:
+            if idx in self._stream_meta and idx not in self._ffmpeg_handles:
+                needs_respawn = True
+                break
+        if needs_respawn:
+            self._spawn_lo_shared()
+
+    def stop_video_stream(self, stream_index: str):
+        if self._lo_shared(stream_index):
+            handle = self._ffmpeg_handles.pop(stream_index, None)
+            self._stream_meta.pop(stream_index, None)
+            if handle is None:
+                return
+            self.logger.info(f"Stopping stream {stream_index}")
+            self._kill_handle(handle)
+
+            # Remove this handle from other lo indices
+            for idx in ["video2", "video3"]:
+                if idx != stream_index and self._ffmpeg_handles.get(idx) is handle:
+                    del self._ffmpeg_handles[idx]
+
+            # Check if any peer needs respawn
+            try:
+                loop = asyncio.get_running_loop()
+                loop.call_soon(self._respawn_lo_peers)
+            except RuntimeError:
+                self._respawn_lo_peers()
+            return
+
+        handle = self._ffmpeg_handles.pop(stream_index, None)
+        self._stream_meta.pop(stream_index, None)
+        if handle is None:
+            return
+        self.logger.info(f"Stopping stream {stream_index}")
+        self._kill_handle(handle)
 
     async def close(self):
         self.logger.info("Cleaning up instance")
@@ -2147,7 +2320,7 @@ class UnifiCamBase(metaclass=ABCMeta):
             raise
 
     async def _watchdog_tick(
-        self, progress: dict[str, tuple[int, float]], now: Optional[float] = None
+        self, progress: dict[str, tuple[int, int, float]], now: Optional[float] = None
     ) -> None:
         now = time.time() if now is None else now
         for stream_index, handle in list(self._ffmpeg_handles.items()):
@@ -2165,10 +2338,13 @@ class UnifiCamBase(metaclass=ABCMeta):
             if produced is None:
                 continue  # can't measure output here; never a false restart
             prev = progress.get(stream_index)
-            if prev is None or produced > prev[0]:
-                progress[stream_index] = (produced, now)
+            if prev is None or prev[0] != handle.pid:
+                progress[stream_index] = (handle.pid, produced, now)
                 continue
-            silent_for = now - prev[1]
+            if produced > prev[1]:
+                progress[stream_index] = (handle.pid, produced, now)
+                continue
+            silent_for = now - prev[2]
             if silent_for >= self._silence_limit():
                 self.logger.warning(
                     f"Stream {stream_index} produced no output for"
