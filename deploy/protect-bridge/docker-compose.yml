@@ -308,7 +308,8 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      - --ptz
+      # --ptz tested 2026-10-25: PTZ commands work but Protect's live view drops
+      # and does not recover (TrackMix dual-lens/auto-track suspected). Leave off.
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
