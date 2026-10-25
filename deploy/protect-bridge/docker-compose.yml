@@ -219,7 +219,8 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      - --ptz
+      # --ptz removed 2026-10-25 per user request (camera PTZ verified working
+      # directly, but keep the bridge UI unchanged).
       - --reolink-snapshot
       - --reolink-push-ai
       # ffmpeg 7.1 stalls on copied Reolink audio (the muxer holds all video
