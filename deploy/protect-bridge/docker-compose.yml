@@ -443,9 +443,9 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      # --ptz trial 2026-10-25: TrackMix A/B. Track Master Bed (same model,
-      # reostream source) moved but Protect's live view went black.
-      - --ptz
+      # --ptz A/B 2026-10-25: with the flag on this 4K HEVC camera, Protect
+      # showed snapshots/black even on a direct camera source. Removed to
+      # confirm the flag itself is the trigger.
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
