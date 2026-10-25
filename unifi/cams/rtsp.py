@@ -281,9 +281,8 @@ class RTSPCam(UnifiCamBase):
                 "-r 1 "
                 f"-update 1 {self.snapshot_dir}/screen.jpg"
             )
-            self.logger.info(
-                f"Spawning stream for snapshots: {self.redact_secrets(cmd)}"
-            )
+            # Keep credential-bearing shell commands out of startup logs.
+            self.logger.info("Spawning stream for snapshots")
             self.snapshot_stream = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True
             )
