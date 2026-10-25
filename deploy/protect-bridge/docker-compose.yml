@@ -309,10 +309,8 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      # --ptz retry 2026-10-25: first test moved the camera but Protect's live
-      # view dropped and did not recover. Trying again now that the initial
-      # capability registration has settled; revert if it repeats.
-      - --ptz
+      # --ptz tested 2026-10-25: moves the camera but Protect's live view drops
+      # and stays black (TrackMix). Reverted; see Track Annex A/B.
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args

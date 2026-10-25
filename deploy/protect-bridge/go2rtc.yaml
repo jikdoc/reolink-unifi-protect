@@ -54,7 +54,7 @@ streams:
   # TrackMix WiFi wide lens (main H.265 3840x2160@25); tele lens not relayed.
   track_masterbed: rtsp://127.0.0.1:8561/masterbed
   # TrackMix WiFi "Track Annex" wide lens (main H.265 3840x2160@25).
-  track_annex: rtsp://127.0.0.1:8561/annex
+  track_annex: rtsp://${CAM_USER}:${CAM_PASS_URL}@${TA_IP}:554/h264Preview_01_main
   # E1 Zoom (main 2560x1920@20) and E1 Outdoor Pro (main H.265 3840x2160@20).
   e1_forest: rtsp://${CAM_USER}:${CAM_PASS_URL}@${FO_IP}:554/h264Preview_01_main
   e1_playroom: rtsp://${CAM_USER}:${CAM_PASS_URL}@${PL_IP}:554/h264Preview_01_main
@@ -71,4 +71,4 @@ streams:
   # 2026-10-23 the cameras own sub stream (896x512 H.264 15fps), copied - was a
   # CPU decode of the 4K main + h264_sub360 encode (~0.65 core each).
   track_masterbed_motion: rtsp://127.0.0.1:8561/masterbed_sub
-  track_annex_motion: rtsp://127.0.0.1:8561/annex_sub
+  track_annex_motion: rtsp://${CAM_USER}:${CAM_PASS_URL}@${TA_IP}:554/h264Preview_01_sub
