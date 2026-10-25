@@ -445,6 +445,9 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
+      # --ptz trial 2026-10-25: TrackMix A/B. Track Master Bed (same model,
+      # reostream source) moved but Protect's live view went black.
+      - --ptz
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
