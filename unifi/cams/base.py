@@ -136,12 +136,23 @@ class UnifiCamBase(metaclass=ABCMeta):
         parser.add_argument(
             "--hw-transcode",
             action="store_true",
-            help="Hardware-transcode video to H.264 via Intel QSV (iGPU)",
+            help="Hardware-transcode the high stream to H.264 using --hw-backend",
+        )
+        parser.add_argument(
+            "--hw-backend",
+            default="qsv",
+            choices=["qsv", "vaapi"],
+            help="Hardware backend: qsv for Intel (default), vaapi for AMD/Mesa",
+        )
+        parser.add_argument(
+            "--vaapi-driver",
+            default=None,
+            help="Optional libva driver override (e.g. iHD or radeonsi); default: auto",
         )
         parser.add_argument(
             "--hw-device",
             default="/dev/dri/renderD128",
-            help="Intel render node for --hw-transcode",
+            help="DRM render node for hardware transcoding",
         )
         parser.add_argument(
             "--transcode-width",
@@ -153,7 +164,7 @@ class UnifiCamBase(metaclass=ABCMeta):
             "--transcode-height",
             default=776,
             type=int,
-            help="Output height for --hw-transcode (vpp_qsv needs both explicitly)",
+            help="Output height for --hw-transcode",
         )
         parser.add_argument(
             "--transcode-bitrate",
@@ -194,32 +205,12 @@ class UnifiCamBase(metaclass=ABCMeta):
         parser.add_argument(
             "--lo-h265-transcode",
             action="store_true",
-            help="QSV-transcode the medium/low channels to H.265",
+            help="Hardware-transcode the medium/low channels to H.265 using --hw-backend",
         )
         parser.add_argument(
             "--lo-transcode-bitrate",
             default="1M",
             help="Bitrate for --lo-h265-transcode",
-        )
-        parser.add_argument(
-            "--lo-audio-args",
-            default="-c:a copy",
-            help="Audio args for the --lo-h265-transcode channels. Re-encode"
-            " (e.g. '-ar 16000 -ac 1 -codec:a aac -b:a 32k') when copied audio"
-            " stalls ffmpeg 7's FLV muxer",
-        )
-        parser.add_argument(
-            "--no-audio",
-            action="store_true",
-            help="Send video only on every channel (for cameras whose audio"
-            " timestamps stall the FLV muxer)",
-        )
-        parser.add_argument(
-            "--lo-scale",
-            action="store_true",
-            help="With --lo-h265-transcode, scale the medium/low channels to"
-            " --lo-width x --lo-height on the iGPU, so all channels can come"
-            " from the camera's main stream (one stream from the camera)",
         )
         # On pvemed (i7-12700 UHD 770) the QSV HEVC *decoder* hung the GPU on
         # Reolink 5120x1552 / 4096x1536 main streams within minutes, on both the
@@ -254,6 +245,25 @@ class UnifiCamBase(metaclass=ABCMeta):
             default=2,
             type=int,
             help="Decoder threads per lo channel with --lo-decode cpu",
+        )
+
+        parser.add_argument(
+            "--lo-audio-args",
+            default=None,
+            help="Audio args for --lo-h265-transcode only; default: QSV copy, "
+            "VA-API AAC 16k mono. For FFmpeg 7 use '-ar 16000 -ac 1 -c:a aac -b:a 32k'",
+        )
+        parser.add_argument(
+            "--no-audio",
+            action="store_true",
+            help="Disable audio on every channel, including the reolink source",
+        )
+        parser.add_argument(
+            "--lo-scale",
+            action="store_true",
+            help="With --lo-h265-transcode, scale lower channels to --lo-width x "
+            "--lo-height using Intel QSV or VA-API (--hw-backend). A shared relay "
+            "is required to consolidate upstream camera connections",
         )
 
     async def _run(self, ws) -> None:
@@ -338,6 +348,9 @@ class UnifiCamBase(metaclass=ABCMeta):
             "video3",
         )
 
+    def _hw_backend(self) -> str:
+        return getattr(self.args, "hw_backend", "qsv")
+
     def _lo_cpu_decoding(self, stream_index: str = "") -> bool:
         return (
             self._lo_h265_transcoding(stream_index)
@@ -346,6 +359,20 @@ class UnifiCamBase(metaclass=ABCMeta):
 
     def _decode_prefix(self, stream_index: str = "") -> str:
         # Pre-input (decode) slot.
+        if self._hw_backend() == "vaapi":
+            # Keep decoded frames on the AMD/Mesa GPU for scaling and encoding.
+            if self._hw_transcoding(stream_index) or self._lo_h265_transcoding(
+                stream_index
+            ):
+                device = shlex.quote(self.args.hw_device)
+                # Automatic decoder threading can exhaust FFmpeg 6 VA-API
+                # surface pools on workers with many CPUs. Decode on the GPU
+                # with one submission thread.
+                return (
+                    f"-hwaccel vaapi -hwaccel_device {device}"
+                    " -hwaccel_output_format vaapi -threads 1 "
+                )
+            return ""
         if self._lo_cpu_decoding(stream_index):
             # No -hwaccel: decode in software. The QSV device exists only
             # for the encoder (hwupload in the filter chain), derived from
@@ -390,9 +417,34 @@ class UnifiCamBase(metaclass=ABCMeta):
         return args
 
     def _extra_ffmpeg_args(self, stream_index: str = "") -> str:
+        if self._hw_backend() == "vaapi":
+            if self._lo_h265_transcoding(stream_index):
+                # Keep the substream's size; normalize 10-bit input to the
+                # 8-bit surfaces used by the HEVC Main encoder.
+                lo_fps = getattr(self.args, "lo_fps", None) or 30
+                size = (
+                    f"w={self.args.lo_width}:h={self.args.lo_height}:"
+                    if getattr(self.args, "lo_scale", False)
+                    else ""
+                )
+                audio = getattr(self.args, "lo_audio_args", None) or (
+                    "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+                )
+                return (
+                    f'-vf "scale_vaapi={size}format=nv12" -c:v hevc_vaapi'
+                    f" -b:v {self.args.lo_transcode_bitrate} -g {lo_fps} -bf 0 {audio}"
+                )
+            if self._hw_transcoding(stream_index):
+                hi_fps = getattr(self.args, "hi_fps", None) or 30
+                return (
+                    f'-vf "scale_vaapi=w={self.args.transcode_width}'
+                    f':h={self.args.transcode_height}:format=nv12"'
+                    f" -c:v h264_vaapi -b:v {self.args.transcode_bitrate}"
+                    f" -g {hi_fps} -bf 0"
+                    " -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+                )
         if self._lo_h265_transcoding(stream_index):
-            # Same dimensions in and out — no scaler, decode straight
-            # into hevc_qsv on the iGPU.
+            # Scaling is opt-in; a relay, not the scaler, shares camera sessions.
             # -g = 1s keyframe cadence: hevc_qsv's default GOP is many
             # seconds long, which forced Protect's thumbnailer to decode
             # 8+s of video per event thumb (10-25s, queueing) — the app
@@ -411,9 +463,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                 )
                 scale = f'-vf "{cpu_scale}format=nv12,hwupload=extra_hw_frames=16" '
             elif getattr(self.args, "lo_scale", False):
-                scale = (
-                    f'-vf "vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}" '
-                )
+                scale = f'-vf "vpp_qsv=w={self.args.lo_width}:h={self.args.lo_height}" '
             else:
                 scale = ""
             audio = getattr(self.args, "lo_audio_args", None) or "-c:a copy"
@@ -445,7 +495,7 @@ class UnifiCamBase(metaclass=ABCMeta):
         # Vocabulary matched to a real G5's measured hello (rjmotion/finch):
         # plural key names, mic as an int, capability booleans alongside.
         codecs = ["h264"]
-        if getattr(self.args, "hi_codec", "h264") == "h265":
+        if self._emits_h265("video1") or self._lo_h265_transcoding("video2"):
             codecs.append("h265")
         flags = {
             "mic": 1,
@@ -1104,6 +1154,12 @@ class UnifiCamBase(metaclass=ABCMeta):
         )
 
     async def process_video_settings(self, msg: AVClientRequest) -> AVClientResponse:
+        # Advertise the encoded output, which may differ from the camera source.
+        transcode_hi = self._hw_transcoding("video1")
+        hi_codec = "h264" if transcode_hi else self.args.hi_codec
+        hi_width = self.args.transcode_width if transcode_hi else self.args.hi_width
+        hi_height = self.args.transcode_height if transcode_hi else self.args.hi_height
+        lo_codec = "h265" if self._lo_h265_transcoding("video2") else self.args.lo_codec
         vid_dst = {
             "video1": ["file:///dev/null"],
             "video2": ["file:///dev/null"],
@@ -1143,9 +1199,14 @@ class UnifiCamBase(metaclass=ABCMeta):
                                 if handle is not None and handle.poll() is None:
                                     dest = (host, int(port))
                                     started = self.__dict__.get("_stream_started", {})
-                                    age = time.monotonic() - started.get(k, float("-inf"))
+                                    age = time.monotonic() - started.get(
+                                        k, float("-inf")
+                                    )
                                     changed = self._stream_meta.get(k) != (stream, dest)
-                                    if changed or age >= self.STREAM_REREQUEST_GRACE_SEC:
+                                    if (
+                                        changed
+                                        or age >= self.STREAM_REREQUEST_GRACE_SEC
+                                    ):
                                         self.logger.info(
                                             f"Protect re-requested {k}; restarting"
                                             " its pipeline"
@@ -1183,7 +1244,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                     "hdrMode": 0,
                     "lowDelay": False,
                     "videoMode": "default",
-                    "videoCodec": self.args.hi_codec,
+                    "videoCodec": hi_codec,
                     "mjpg": {
                         "avSerializer": {
                             "destinations": [
@@ -1246,7 +1307,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "enabled": True,
                         "fps": self.args.hi_fps,
                         "gopModel": 0,
-                        "height": self.args.hi_height,
+                        "height": hi_height,
                         "horizontalFlip": False,
                         "isCbr": False,
                         "maxFps": 30,
@@ -1257,7 +1318,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "sourceId": 0,
                         "streamId": 1,
                         "streamOrdinal": 0,
-                        "type": self.args.hi_codec,
+                        "type": hi_codec,
                         "validBitrateRangeMax": 16000000,
                         "validBitrateRangeMin": 32000,
                         "validFpsValues": [
@@ -1280,7 +1341,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                             30,
                         ],
                         "verticalFlip": False,
-                        "width": self.args.hi_width,
+                        "width": hi_width,
                     },
                     "video2": {
                         "M": 1,
@@ -1319,7 +1380,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "sourceId": 1,
                         "streamId": 2,
                         "streamOrdinal": 1,
-                        "type": self.args.lo_codec,
+                        "type": lo_codec,
                         "validBitrateRangeMax": 1500000,
                         "validBitrateRangeMin": 32000,
                         "validFpsValues": [
@@ -1381,7 +1442,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                         "sourceId": 2,
                         "streamId": 4,
                         "streamOrdinal": 2,
-                        "type": self.args.lo_codec,
+                        "type": lo_codec,
                         "validBitrateRangeMax": 750000,
                         "validBitrateRangeMin": 32000,
                         "validFpsValues": [
@@ -1962,6 +2023,8 @@ class UnifiCamBase(metaclass=ABCMeta):
         except subprocess.CalledProcessError:
             self.logger.exception("Could not check for ffmpeg options")
 
+        # Keep decoded frames on the selected backend (QSV or VA-API) for
+        # scaling and encoding; software decoding is handled in _decode_prefix.
         return self._decode_prefix(stream_index) + " ".join(base_args)
 
     async def start_video_stream(
@@ -1992,18 +2055,22 @@ class UnifiCamBase(metaclass=ABCMeta):
             if is_dead:
                 self.logger.warn(f"Previous ffmpeg process for {stream_index} died.")
 
-            self.logger.info(
-                f"Spawning ffmpeg for {stream_index} ({stream_name}):"
-                f" {self.redact_secrets(cmd)}"
-            )
+            # Shell quoting can split a password across quote transitions, so
+            # redacting the assembled command cannot reliably hide credentials.
+            self.logger.info(f"Spawning ffmpeg for {stream_index} ({stream_name})")
             # start_new_session: the whole pipeline (ffmpeg, the
             # hevc_flv/clock_sync helpers, nc) shares one process
             # group so stop_video_stream can tear it down as a unit
             # instead of orphaning ffmpeg when only the shell is killed.
             self._stream_meta[stream_index] = (stream_name, destination)
+            driver = getattr(self.args, "vaapi_driver", None)
+            environment = os.environ.copy()
+            if driver:
+                environment["LIBVA_DRIVER_NAME"] = driver
             self._ffmpeg_handles[stream_index] = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
+                env=environment,
                 shell=True,
                 start_new_session=True,
             )

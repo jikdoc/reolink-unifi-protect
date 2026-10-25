@@ -42,8 +42,22 @@ def cert(tmp_path_factory):
     d = tmp_path_factory.mktemp("cert")
     key, crt = d / "k.pem", d / "c.pem"
     subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-         "-keyout", str(key), "-out", str(crt), "-days", "1", "-subj", "/CN=t"],
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(crt),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=t",
+        ],
         check=True,
         capture_output=True,
     )
@@ -59,8 +73,16 @@ def cam(cert, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["unifi-cam-proxy", "--host", "10.0.0.6", "--cert", str(cert),
-         "rtsp", "-s", "rtsp://cam/main"],
+        [
+            "unifi-cam-proxy",
+            "--host",
+            "10.0.0.6",
+            "--cert",
+            str(cert),
+            "rtsp",
+            "-s",
+            "rtsp://cam/main",
+        ],
     )
     args = parse_args()
     cam = RTSPCam(args, logging.getLogger("test"))

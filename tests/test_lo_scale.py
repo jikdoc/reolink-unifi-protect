@@ -1,9 +1,10 @@
-"""Cutting the medium/low channels from the main stream.
+"""Backend-aware lower-channel scaling and opt-in audio controls.
 
-Real case: a Wi-Fi Reolink Elite Floodlight carried its 3 Mbps main stream alone at full
-rate, but starved (249 of 400 frames) when main and sub were pulled together, so Protect
-timed out every channel. With --lo-scale every channel is fed from one main stream and
-the lo channels are scaled on the iGPU.
+A shared relay supplies one upstream connection; scaling alone does not. Real case: a
+Wi-Fi Reolink Elite Floodlight carried its 3 Mbps main stream alone at full rate, but
+starved (249 of 400 frames) when main and sub were pulled together, so Protect timed out
+every channel. With --lo-scale every channel is fed from one main stream and the lo
+channels are scaled on the GPU (or on the CPU with --lo-decode cpu).
 """
 
 import argparse
@@ -73,14 +74,18 @@ def test_lo_audio_args_replace_the_audio_copy():
 
 def test_lo_decode_defaults_to_qsv():
     cam = make_cam(lo_scale=True, hw_device="/dev/dri/renderD128")
-    assert cam._decode_prefix("video3") == "-hwaccel qsv -qsv_device /dev/dri/renderD128 "
+    assert (
+        cam._decode_prefix("video3") == "-hwaccel qsv -qsv_device /dev/dri/renderD128 "
+    )
 
 
 def test_lo_decode_cpu_scales_in_software_and_uploads_for_the_encoder():
     cam = make_cam(lo_scale=True, lo_decode="cpu")
     for stream in ("video2", "video3"):
         args = cam.get_extra_ffmpeg_args(stream)
-        assert args.startswith('-vf "scale=1920:576,format=nv12,hwupload=extra_hw_frames=16" ')
+        assert args.startswith(
+            '-vf "scale=1920:576,format=nv12,hwupload=extra_hw_frames=16" '
+        )
         assert "vpp_qsv" not in args
         assert "-c:v hevc_qsv -b:v 1M -g 20" in args
 
@@ -91,8 +96,12 @@ def test_lo_decode_cpu_without_lo_scale_keeps_the_size():
 
 
 def test_lo_decode_cpu_drops_hwaccel_and_creates_the_encode_device():
-    cam = make_cam(lo_scale=True, lo_decode="cpu", hw_device="/dev/dri/renderD128",
-                   lo_decode_threads=2)
+    cam = make_cam(
+        lo_scale=True,
+        lo_decode="cpu",
+        hw_device="/dev/dri/renderD128",
+        lo_decode_threads=2,
+    )
     prefix = cam._decode_prefix("video3")
     assert "-hwaccel" not in prefix
     assert prefix == (
