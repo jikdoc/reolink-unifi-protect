@@ -565,6 +565,7 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
+      - --ptz
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
@@ -627,6 +628,7 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
+      - --ptz
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
@@ -693,6 +695,7 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
+      - --ptz
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
