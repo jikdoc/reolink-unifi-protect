@@ -27,21 +27,21 @@ srtp:
 # "GPU HANG ... in dec0:0:hevc"), taking Scrypted and Immich down with it; the
 # encoder was never involved. ~0.5 core per stream vs ~2 for all-software.
 ffmpeg:
-  h264_sub720: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=1920:720,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 2M -maxrate 3M -g 20 -bf 0
-  h264_sub576: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=1920:576,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 2M -maxrate 3M -g 20 -bf 0
+  h264_sub720: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1920:720,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
+  h264_sub576: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1920:576,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
   # Portrait (3:4) cut for the Doorbell Deck.
-  h264_sub1440p: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=1080:1440,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 2M -maxrate 3M -g 20 -bf 0
+  h264_sub1440p: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1080:1440,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
   # Doorbell Deck main cut to 1536x2048 (3:4) so it fits the AI Port 3840x2160 limit
   # (the camera only offers 1920x2560). Its main is H.264, so it is decoded and scaled
   # on the iGPU too (2026-10-22: 0.41 -> 0.01 core); only HEVC decode hung the iGPU.
-  # Needs #input=rtsp_vaapi so the frames arrive as VAAPI surfaces.
-  rtsp_vaapi: -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -fflags nobuffer -flags low_delay -timeout 5000000 -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i {input}
-  h264_2048p: -vf scale_vaapi=w=1536:h=2048:format=nv12 -c:v h264_vaapi -low_power 1 -b:v 4M -maxrate 5M -g 20 -bf 0
+  # Needs #input=rtsp_cuda so the frames arrive as VAAPI surfaces.
+  rtsp_cuda: -hwaccel cuda -hwaccel_device 1 -hwaccel_output_format cuda -c:v h264_cuvid -gpu 1 -fflags nobuffer -flags low_delay -timeout 5000000 -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i {input}
+  h264_2048p: -vf scale_cuda=1536:2048 -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 4M -maxrate 5M -g 20 -bf 0 -map 0:v:0 -map 0:a?
   # E1 Outdoor Pro lo channels (main switched to H.264 2026-10-23, so iGPU decode is safe).
-  h264_1080p: -vf scale_vaapi=w=1920:h=1080:format=nv12 -c:v h264_vaapi -low_power 1 -b:v 1500k -maxrate 2M -g 20 -bf 0
+  h264_1080p: -vf scale_cuda=1920:1080 -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 1500k -maxrate 2M -g 20 -bf 0 -map 0:v:0 -map 0:a?
   # Small stream for Scrypted's HomeKit view of the H.265 pass-through cameras
   # (and its motion detection), whose Protect RTSP share has no video.
-  h264_sub360: -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -vf scale=640:360,format=nv12,hwupload -c:v h264_vaapi -low_power 1 -b:v 512k -maxrate 768k -g 25 -bf 0
+  h264_sub360: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=640:360,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 512k -maxrate 768k -g 25 -bf 0
 
 streams:
   elite_sophia: rtsp://${CAM_USER}:${CAM_PASS_URL}@${CAM_IP}:554/h264Preview_01_main
@@ -49,6 +49,15 @@ streams:
   # Back Gate H.264 sub (1920x720): source for its Protect lo channels (iGPU H.264 decode
   # + hevc_qsv in the proxy) since 2026-10-23, instead of CPU-decoding the H.265 main.
   back_gate_sub: rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_sub
+  # Duo Generator (2026-10-29): direct RTSP, not reostream (its Baichuan session idled out
+  # behind the MoCA on 10-25). Main H.265 4608x1728 passed through; H.264 sub 1536x576
+  # feeds the lo channels (iGPU H.264 decode), the Back Gate pattern.
+  duo_generator: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DG_IP}:554/h264Preview_01_main
+  duo_generator_sub: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DG_IP}:554/h264Preview_01_sub
+  # Elite Guest Bed (2026-10-29): direct RTSP. Main H.265 5120x1552 passed through; H.264 sub
+  # 1920x576 feeds the lo channels (iGPU H.264 decode). Main+sub tested 400/400 + 400/400.
+  elite_guest_bed: rtsp://${CAM_USER}:${CAM_PASS_URL}@${EGB_IP}:554/h264Preview_01_main
+  elite_guest_bed_sub: rtsp://${CAM_USER}:${CAM_PASS_URL}@${EGB_IP}:554/h264Preview_01_sub
   # 2026-10-25 reostream trial: the four TrackMix sources below come from reostream
   # (Baichuan) instead of the cameras RTSP. Old lines: go2rtc.yaml.bak-20261025-pre-reostream.
   # TrackMix WiFi wide lens (main H.265 3840x2160@25); tele lens not relayed.
@@ -56,19 +65,23 @@ streams:
   # TrackMix WiFi "Track Annex" wide lens (main H.265 3840x2160@25).
   track_annex: rtsp://127.0.0.1:8561/annex
   # E1 Zoom (main 2560x1920@20) and E1 Outdoor Pro (main H.265 3840x2160@20).
-  e1_forest: rtsp://${CAM_USER}:${CAM_PASS_URL}@${FO_IP}:554/h264Preview_01_main
-  e1_playroom: rtsp://${CAM_USER}:${CAM_PASS_URL}@${PL_IP}:554/h264Preview_01_main
-  e1_server: rtsp://${CAM_USER}:${CAM_PASS_URL}@${SV_IP}:554/h264Preview_01_main
-  e1_deck_middle: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DM_IP}:554/h264Preview_01_main
+  e1_forest: rtsp://127.0.0.1:8561/e1_forest
+  e1_playroom: rtsp://127.0.0.1:8561/e1_playroom
+  e1_server: rtsp://127.0.0.1:8561/e1_server
+  e1_deck_middle: rtsp://127.0.0.1:8561/e1_deck_middle
   # Protect video2/video3 for the E1 Outdoor Pros: iGPU decode + scale + encode of the H.264 main.
-  e1_server_lo: ffmpeg:e1_server#input=rtsp_vaapi#video=h264_1080p#audio=copy
-  e1_deck_middle_lo: ffmpeg:e1_deck_middle#input=rtsp_vaapi#video=h264_1080p#audio=copy
+  e1_server_lo: ffmpeg:e1_server#input=rtsp_cuda#video=h264_1080p#audio=copy
+  e1_deck_middle_lo: ffmpeg:e1_deck_middle#input=rtsp_cuda#video=h264_1080p#audio=copy
   # Reolink Video Doorbell WiFi-W (main H.264 1920x2560 portrait @20).
-  deck_doorbell: rtsp://${CAM_USER}:${CAM_PASS_URL}@${DD_IP}:554/h264Preview_01_main
+  deck_doorbell: rtsp://127.0.0.1:8561/deck_doorbell
   # What protect-bridge (and so the AI Port) reads for the Doorbell Deck.
-  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_vaapi#video=h264_2048p#audio=copy
+  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_cuda#video=h264_2048p#audio=copy
   # Scrypted: full stream = track_masterbed / track_annex (copy). HomeKit = these:
   # 2026-10-23 the cameras own sub stream (896x512 H.264 15fps), copied - was a
   # CPU decode of the 4K main + h264_sub360 encode (~0.65 core each).
   track_masterbed_motion: rtsp://127.0.0.1:8561/masterbed_sub
   track_annex_motion: rtsp://127.0.0.1:8561/annex_sub
+
+  # Track Sophia (bridge, 2026-10-26): Baichuan via reostream, like the twins.
+  track_sophia: rtsp://127.0.0.1:8561/sophia
+  track_sophia_motion: rtsp://127.0.0.1:8561/sophia_sub

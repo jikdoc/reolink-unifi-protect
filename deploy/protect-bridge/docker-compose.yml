@@ -34,7 +34,7 @@
 #   cd /opt/rup/deploy/protect-bridge && docker compose up -d --build
 
 x-proxy: &proxy
-  image: protect-bridge:pinned
+  image: protect-bridge:nvenc
   restart: unless-stopped
   init: true  # tini reaps orphaned ffmpeg/nc/bash after pipeline restarts (zombies piled up)
   # Host networking: the proxy only connects out (Protect on 7442, the relay
@@ -42,10 +42,10 @@ x-proxy: &proxy
   network_mode: host
   depends_on:
     - relay
-  devices:
-    - /dev/dri:/dev/dri
-  group_add:
-    - video
+  runtime: nvidia
+  environment:
+    NVIDIA_VISIBLE_DEVICES: all
+    NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
   volumes:
     - ./client.pem:/client.pem:ro
     # Bounded scratch space for snapshots and crops; a restart wipes it.
@@ -65,7 +65,7 @@ services:
   # RTSP on 127.0.0.1:8561 for the relay. Status: curl 127.0.0.1:8560/api/status.
   # Rollback: restore go2rtc.yaml.bak-20261025-pre-reostream, restart relay, stop this.
   reostream:
-    image: ghcr.io/volttech21/reostream:0.2.2
+    image: ghcr.io/volttech21/reostream:0.2.7
     container_name: protect-bridge-reostream
     restart: unless-stopped
     network_mode: host
@@ -79,8 +79,10 @@ services:
     container_name: protect-bridge-relay
     restart: unless-stopped
     network_mode: host
-    devices:
-      - /dev/dri:/dev/dri
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     # Supplies the ${...} values used in go2rtc.yaml.
     env_file: .env
     volumes:
@@ -121,7 +123,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -160,12 +162,15 @@ services:
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
-      - --lo-low-power
       # One ffmpeg for video2 + video3 (one CPU decode instead of two).
       - --lo-shared
       - --lo-scale
-      - --lo-decode
-      - cpu
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "0"
+      - --lo-source-codec
+      - hevc
       - --lo-width
       - "1920"
       - --lo-height
@@ -204,7 +209,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -233,9 +238,9 @@ services:
       - --hi-codec
       - h265
       - --hi-width
-      - "4096"
+      - "5120"
       - --hi-height
-      - "1536"
+      - "1920"
       - --hi-fps
       - "20"
       - --lo-codec
@@ -246,12 +251,15 @@ services:
       # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
-      - --lo-low-power
       # 2026-10-23: video2/3 read the camera's H.264 sub (relay back_gate_sub, already
       # 1920x720) and decode it on the iGPU (H.264 only - HEVC iGPU decode hangs);
       # was --lo-scale + --lo-decode cpu of the H.265 main (~0.6 core).
-      - --lo-decode
-      - qsv
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "1"
+      - --lo-source-codec
+      - h264
       # 15 s (10-19) and 45 s (10-22) both gave ~30 restarts/h on the MoCA link;
       # 45 s only made each gap longer. 20 s from 2026-10-22. Revisit after the fiber.
       - --stream-silence-limit
@@ -262,6 +270,176 @@ services:
       - "1920"
       - --lo-height
       - "720"
+      - --lo-fps
+      - "20"
+
+  # Reolink Duo WiFi "Duo Generator" (2026-10-29, clean path after the garage fiber):
+  # main H.265 4608x1728@20 5 Mbps passed through; lo channels from its H.264 sub.
+  duo-generator:
+    <<: *proxy
+    container_name: protect-bridge-duo-generator
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${DG_ADOPTION_TOKEN}"
+      - --mac
+      - "${DG_MAC}"
+      - --ip
+      - "${DG_IP}"
+      - --name
+      - "${DG_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.45"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/duo_generator"
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/duo_generator_sub"
+      - --reolink-ai-host
+      - "${DG_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      # ffmpeg 7.1 stalls on copied Reolink audio (the muxer holds all video
+      # for 10 s and Protect times out): re-encode it, 16 kHz mono as the
+      # camera sends it, on every channel.
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "4608"
+      - --hi-height
+      - "1728"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M"
+      # video2/3 read the camera's H.264 sub (relay duo_generator_sub, 1536x576) and
+      # decode it on the iGPU (H.264 only: iGPU HEVC decode hangs). No AI Port (user).
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "0"
+      - --lo-source-codec
+      - h264
+      - --stream-silence-limit
+      - "20"
+      - --stream-watchdog-interval
+      - "5"
+      - --lo-width
+      - "1536"
+      - --lo-height
+      - "576"
+      - --lo-fps
+      - "20"
+
+  # Reolink Elite Floodlight WiFi "Elite Guest Bed" (2026-10-29, U7 Outdoor Back -65 dBm):
+  # main H.265 5120x1552@20 5 Mbps passed through; lo channels from its H.264 sub.
+  elite-guest-bed:
+    <<: *proxy
+    container_name: protect-bridge-elite-guest-bed
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${EGB_ADOPTION_TOKEN}"
+      - --mac
+      - "${EGB_MAC}"
+      - --ip
+      - "${EGB_IP}"
+      - --name
+      - "${EGB_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.45"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/elite_guest_bed"
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/elite_guest_bed_sub"
+      - --reolink-ai-host
+      - "${EGB_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      # ffmpeg 7.1 stalls on copied Reolink audio (the muxer holds all video
+      # for 10 s and Protect times out): re-encode it, 16 kHz mono as the
+      # camera sends it, on every channel.
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "5120"
+      - --hi-height
+      - "1552"
+      - --hi-fps
+      - "20"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M"
+      # video2/3 read the camera's H.264 sub (relay elite_guest_bed_sub, 1920x576) and
+      # decode it on the iGPU (H.264 only: iGPU HEVC decode hangs).
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "1"
+      - --lo-source-codec
+      - h264
+      - --stream-silence-limit
+      - "20"
+      - --stream-watchdog-interval
+      - "5"
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "576"
       - --lo-fps
       - "20"
 
@@ -296,12 +474,13 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_masterbed"
+      - --ptz
       - --reolink-ai-host
       - "${MB_IP}"
       - --reolink-ai-user
@@ -310,12 +489,12 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      # --ptz tested 2026-10-25: moves the camera but Protect's live view drops
-      # and stays black (TrackMix). Reverted; see Track Annex A/B.
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
       - h265
       - --hi-width
@@ -326,10 +505,27 @@ services:
       - "25"
       - --lo-codec
       - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M"
+      # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
+      - --lo-shared
+      - --lo-scale
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "0"
+      - --lo-source-codec
+      - hevc
+      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
+      # cameras; back on CPU decode.
       - --lo-width
-      - "3840"
+      - "1920"
       - --lo-height
-      - "2160"
+      - "1080"
       - --lo-fps
       - "25"
 
@@ -365,7 +561,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -430,12 +626,13 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_annex"
+      - --ptz
       - --reolink-ai-host
       - "${TA_IP}"
       - --reolink-ai-user
@@ -444,13 +641,12 @@ services:
       - "${CAM_PASS}"
       - --reolink-scheme
       - http
-      # --ptz A/B 2026-10-25: with the flag on this 4K HEVC camera, Protect
-      # showed snapshots/black even on a direct camera source. Removed to
-      # confirm the flag itself is the trigger.
       - --reolink-snapshot
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
       - --hi-codec
       - h265
       - --hi-width
@@ -461,10 +657,108 @@ services:
       - "25"
       - --lo-codec
       - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M"
+      # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
+      - --lo-shared
+      - --lo-scale
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "1"
+      - --lo-source-codec
+      - hevc
+      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
+      # cameras; back on CPU decode.
       - --lo-width
-      - "3840"
+      - "1920"
       - --lo-height
+      - "1080"
+      - --lo-fps
+      - "25"
+
+  # Reolink E1 Zoom "E1 Forest" (clean path), main 2560x1920@20 passed through
+  # untouched on all three channels. Plain G5 Pro, no PTZ (2026-10-22 decision).
+  track-sophia:
+    <<: *proxy
+    container_name: protect-bridge-track-sophia
+    command:
+      - unifi-cam-proxy
+      - --host
+      - "${NVR_IP}"
+      - --cert
+      - /client.pem
+      - --token
+      - "${SO_ADOPTION_TOKEN}"
+      - --mac
+      - "${SO_MAC}"
+      - --ip
+      - "${SO_IP}"
+      - --name
+      - "${SO_NAME}"
+      - --model
+      - "UVC G5 Pro"
+      - --sysid
+      - "0xa598"
+      - --platform
+      - "sav837gw"
+      - --fw-version
+      - "5.5.45"
+      - --fw-build
+      - "92ebf37.260724.1639"
+      - rtsp
+      - -s
+      - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_sophia"
+      - --ptz
+      - --reolink-ai-host
+      - "${SO_IP}"
+      - --reolink-ai-user
+      - "${CAM_USER}"
+      - --reolink-ai-password
+      - "${CAM_PASS}"
+      - --reolink-scheme
+      - http
+      - --reolink-snapshot
+      - --reolink-push-ai
+      - --ffmpeg-args
+      - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --lo-audio-args
+      - "-ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      - --hi-codec
+      - h265
+      - --hi-width
+      - "3840"
+      - --hi-height
       - "2160"
+      - --hi-fps
+      - "25"
+      - --lo-codec
+      - h265
+      - --lo-h265-transcode
+      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
+      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
+      # through the bitrate value because the encoder args are fixed in code.
+      - --lo-transcode-bitrate
+      - "1M"
+      # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
+      - --lo-shared
+      - --lo-scale
+      - --hw-backend
+      - nvenc
+      - --nv-gpu
+      - "0"
+      - --lo-source-codec
+      - hevc
+      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
+      # cameras; back on CPU decode.
+      - --lo-width
+      - "1920"
+      - --lo-height
+      - "1080"
       - --lo-fps
       - "25"
 
@@ -494,7 +788,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -556,7 +850,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -618,7 +912,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -645,7 +939,7 @@ services:
       - --hi-height
       - "1440"
       - --hi-fps
-      - "20"
+      - "25"
       - --lo-codec
       - h264
       # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
@@ -656,7 +950,7 @@ services:
       - --lo-height
       - "1080"
       - --lo-fps
-      - "20"
+      - "25"
 
 
   # Reolink E1 Outdoor Pro "E1 Deck Middle" (clean path), main H.265 3840x2160@20,
@@ -685,7 +979,7 @@ services:
       - --platform
       - "sav837gw"
       - --fw-version
-      - "5.5.31"
+      - "5.5.45"
       - --fw-build
       - "92ebf37.260724.1639"
       - rtsp
@@ -712,7 +1006,7 @@ services:
       - --hi-height
       - "1440"
       - --hi-fps
-      - "20"
+      - "25"
       - --lo-codec
       - h264
       # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
@@ -723,5 +1017,5 @@ services:
       - --lo-height
       - "1080"
       - --lo-fps
-      - "20"
+      - "25"
 

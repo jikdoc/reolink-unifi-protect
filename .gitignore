@@ -12,3 +12,7 @@ MANIFEST.in
 .pyre/
 .vscode/settings.json
 .vscode/launch.json
+
+# reostream config holds camera logins
+deploy/protect-bridge/reostream/
+*.bak-*

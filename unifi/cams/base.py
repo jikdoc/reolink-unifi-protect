@@ -141,8 +141,20 @@ class UnifiCamBase(metaclass=ABCMeta):
         parser.add_argument(
             "--hw-backend",
             default="qsv",
-            choices=["qsv", "vaapi"],
-            help="Hardware backend: qsv for Intel (default), vaapi for AMD/Mesa",
+            choices=["qsv", "vaapi", "nvenc"],
+            help="Hardware backend: qsv for Intel (default), vaapi for AMD/Mesa, nvenc for NVIDIA",
+        )
+        parser.add_argument(
+            "--nv-gpu",
+            default=0,
+            type=int,
+            help="NVIDIA GPU index for --hw-backend nvenc",
+        )
+        parser.add_argument(
+            "--lo-source-codec",
+            default="hevc",
+            choices=["hevc", "h264"],
+            help="Codec of the stream the lo channels decode with --hw-backend nvenc",
         )
         parser.add_argument(
             "--vaapi-driver",
@@ -370,6 +382,9 @@ class UnifiCamBase(metaclass=ABCMeta):
         return getattr(self.args, "hw_backend", "qsv")
 
     def _lo_cpu_decoding(self, stream_index: str = "") -> bool:
+        if self._hw_backend() == "nvenc":
+            # CUDA decodes on the GPU; --lo-decode is ignored.
+            return False
         return (
             self._lo_h265_transcoding(stream_index)
             and getattr(self.args, "lo_decode", "qsv") == "cpu"
@@ -382,6 +397,22 @@ class UnifiCamBase(metaclass=ABCMeta):
 
     def _decode_prefix(self, stream_index: str = "") -> str:
         # Pre-input (decode) slot.
+        if self._hw_backend() == "nvenc":
+            gpu = getattr(self.args, "nv_gpu", 0)
+            if self._lo_h265_transcoding(stream_index):
+                codec = getattr(self.args, "lo_source_codec", "hevc")
+            elif self._hw_transcoding(stream_index):
+                codec = (
+                    "hevc"
+                    if getattr(self.args, "hi_codec", "h264") == "h265"
+                    else "h264"
+                )
+            else:
+                return ""
+            return (
+                f"-hwaccel cuda -hwaccel_device {gpu} -hwaccel_output_format cuda"
+                f" -c:v {codec}_cuvid -gpu {gpu} "
+            )
         if self._hw_backend() == "vaapi":
             # Keep decoded frames on the AMD/Mesa GPU for scaling and encoding.
             if self._hw_transcoding(stream_index) or self._lo_h265_transcoding(
@@ -444,6 +475,11 @@ class UnifiCamBase(metaclass=ABCMeta):
         # channels are cut from the main stream, so the camera is only ever
         # asked for one stream (Wi-Fi cameras cannot carry main and sub at
         # once). Without scaling, decode goes straight into hevc_qsv.
+        if self._hw_backend() == "nvenc":
+            # scale_cuda stays on the GPU for the hevc_nvenc encoder.
+            if getattr(self.args, "lo_scale", False):
+                return f"scale_cuda={self.args.lo_width}:{self.args.lo_height}"
+            return ""
         if self._lo_cpu_decoding("video2"):
             # Software frames: scale on the CPU (if asked), then hand
             # them to the QSV encoder through the -filter_hw_device.
@@ -464,6 +500,12 @@ class UnifiCamBase(metaclass=ABCMeta):
         # 8+s of video per event thumb (10-25s, queueing) — the app
         # then falls back to a stale full-frame snapshot.
         lo_fps = getattr(self.args, "lo_fps", None) or 30
+        if self._hw_backend() == "nvenc":
+            gpu = getattr(self.args, "nv_gpu", 0)
+            return (
+                f"-c:v hevc_nvenc -gpu {gpu} -preset p4 -tune ll"
+                f" -b:v {self.args.lo_transcode_bitrate} -bf 0 -g {lo_fps}"
+            )
         low_power = " -low_power 1" if getattr(self.args, "lo_low_power", False) else ""
         return (
             f"-c:v hevc_qsv -b:v {self.args.lo_transcode_bitrate}"
@@ -474,6 +516,24 @@ class UnifiCamBase(metaclass=ABCMeta):
         return getattr(self.args, "lo_audio_args", None) or "-c:a copy"
 
     def _extra_ffmpeg_args(self, stream_index: str = "") -> str:
+        if self._hw_backend() == "nvenc":
+            if self._lo_h265_transcoding(stream_index):
+                vf = self._lo_video_filter()
+                vf_str = f'-vf "{vf}" ' if vf else ""
+                audio = self._lo_audio_args()
+                encode = self._lo_encode_args()
+                return f"{vf_str}{encode} {audio}"
+            if self._hw_transcoding(stream_index):
+                gpu = getattr(self.args, "nv_gpu", 0)
+                hi_fps = getattr(self.args, "hi_fps", None) or 30
+                return (
+                    f'-vf "scale_cuda={self.args.transcode_width}'
+                    f':{self.args.transcode_height}"'
+                    f" -c:v h264_nvenc -gpu {gpu} -preset p4 -tune ll"
+                    f" -b:v {self.args.transcode_bitrate} -bf 0 -g {hi_fps}"
+                    " -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+                )
+            return self.args.ffmpeg_args
         if self._hw_backend() == "vaapi":
             if self._lo_h265_transcoding(stream_index):
                 # Keep the substream's size; normalize 10-bit input to the
@@ -2144,7 +2204,10 @@ class UnifiCamBase(metaclass=ABCMeta):
         w, h = getattr(self.args, "lo_width", None), getattr(
             self.args, "lo_height", None
         )
-        if self._lo_cpu_decoding("video2"):
+        if self._hw_backend() == "nvenc":
+            pre = f"scale_cuda={w}:{h}" if scale else "null"
+            graph = f"[0:v]{pre}[o0]" if n == 1 else f"[0:v]{pre},split=2[o0][o1]"
+        elif self._lo_cpu_decoding("video2"):
             pre = f"scale={w}:{h}" if scale else "null"
             post = "format=nv12,hwupload=extra_hw_frames=16"
             if n == 1:
