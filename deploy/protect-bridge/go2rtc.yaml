@@ -21,34 +21,36 @@ webrtc:
 srtp:
   listen: ""
 
-# Sub-stream presets: decode + scale on the CPU, encode H.264 on the iGPU in
-# low-power (VDENC) mode, which keeps the encode off the busy render engine (2026-10-22).
-# Hardware HEVC decode of these main streams hung the shared iGPU (2026-10-19,
-# "GPU HANG ... in dec0:0:hevc"), taking Scrypted and Immich down with it; the
-# encoder was never involved. ~0.5 core per stream vs ~2 for all-software.
+# Transcode presets for the two NVIDIA cards in CT 319 (pvebig). The 27B model
+# shares both cards and GPU 1 also carries its vision part, so the transcodes
+# are split: the E1 lo cuts on GPU 1, the Doorbell Deck cut on GPU 0
+# (2026-11-12). Unused presets (h264_sub*) are kept for reference.
 ffmpeg:
   h264_sub720: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1920:720,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
   h264_sub576: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1920:576,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
   # Portrait (3:4) cut for the Doorbell Deck.
   h264_sub1440p: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=1080:1440,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 2M -maxrate 3M -g 20 -bf 0
   # Doorbell Deck main cut to 1536x2048 (3:4) so it fits the AI Port 3840x2160 limit
-  # (the camera only offers 1920x2560). Its main is H.264, so it is decoded and scaled
-  # on the iGPU too (2026-10-22: 0.41 -> 0.01 core); only HEVC decode hung the iGPU.
-  # Needs #input=rtsp_cuda so the frames arrive as VAAPI surfaces.
+  # (the camera only offers 1920x2560). Needs #input=rtsp_cuda0 so the frames arrive
+  # as CUDA surfaces. "-map 0:v:0" makes ffmpeg exit when go2rtc hands it an
+  # audio-only input (2026-11-10: 17 h without doorbell video).
   rtsp_cuda: -hwaccel cuda -hwaccel_device 1 -hwaccel_output_format cuda -c:v h264_cuvid -gpu 1 -fflags nobuffer -flags low_delay -timeout 5000000 -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i {input}
-  h264_2048p: -vf scale_cuda=1536:2048 -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 4M -maxrate 5M -g 20 -bf 0 -map 0:v:0 -map 0:a?
-  # E1 Outdoor Pro lo channels (main switched to H.264 2026-10-23, so iGPU decode is safe).
+  rtsp_cuda0: -hwaccel cuda -hwaccel_device 0 -hwaccel_output_format cuda -c:v h264_cuvid -gpu 0 -fflags nobuffer -flags low_delay -timeout 5000000 -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -i {input}
+  h264_2048p: -vf scale_cuda=1536:2048 -c:v h264_nvenc -gpu 0 -preset p4 -tune ll -b:v 4M -maxrate 5M -g 20 -bf 0 -map 0:v:0 -map 0:a?
+  # E1 Outdoor Pro lo channels (main is H.264 since 2026-10-23).
   h264_1080p: -vf scale_cuda=1920:1080 -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 1500k -maxrate 2M -g 20 -bf 0 -map 0:v:0 -map 0:a?
   # Small stream for Scrypted's HomeKit view of the H.265 pass-through cameras
   # (and its motion detection), whose Protect RTSP share has no video.
   h264_sub360: -init_hw_device cuda=cu:1 -filter_hw_device cu -vf scale=640:360,format=nv12,hwupload_cuda -c:v h264_nvenc -gpu 1 -preset p4 -tune ll -b:v 512k -maxrate 768k -g 25 -bf 0
 
 streams:
-  elite_sophia: rtsp://${CAM_USER}:${CAM_PASS_URL}@${CAM_IP}:554/h264Preview_01_main
-  back_gate: rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_main
-  # Back Gate H.264 sub (1920x720): source for its Protect lo channels (iGPU H.264 decode
-  # + hevc_qsv in the proxy) since 2026-10-23, instead of CPU-decoding the H.265 main.
-  back_gate_sub: rtsp://${CAM_USER}:${CAM_PASS_URL}@${BG_IP}:554/h264Preview_01_sub
+  # 2026-11-12: Elite Sophia and Back Gate moved to reostream (Baichuan) now that the
+  # MoCA leg is gone. Old direct-RTSP lines: go2rtc.yaml.bak-20261112-pre-revisit.
+  elite_sophia: rtsp://127.0.0.1:8561/elite_sophia
+  back_gate: rtsp://127.0.0.1:8561/back_gate
+  # Back Gate H.264 sub (1920x720): source for its Protect lo channels (h264_cuvid +
+  # hevc_nvenc in the proxy), instead of decoding the H.265 main.
+  back_gate_sub: rtsp://127.0.0.1:8561/back_gate_sub
   # Duo Generator (2026-10-29): direct RTSP, not reostream (its Baichuan session idled out
   # behind the MoCA on 10-25). Main H.265 4608x1728 passed through; H.264 sub 1536x576
   # feeds the lo channels (iGPU H.264 decode), the Back Gate pattern.
@@ -69,13 +71,13 @@ streams:
   e1_playroom: rtsp://127.0.0.1:8561/e1_playroom
   e1_server: rtsp://127.0.0.1:8561/e1_server
   e1_deck_middle: rtsp://127.0.0.1:8561/e1_deck_middle
-  # Protect video2/video3 for the E1 Outdoor Pros: iGPU decode + scale + encode of the H.264 main.
+  # Protect video2/video3 for the E1 Outdoor Pros: GPU decode + scale + encode of the H.264 main.
   e1_server_lo: ffmpeg:e1_server#input=rtsp_cuda#video=h264_1080p#audio=copy
   e1_deck_middle_lo: ffmpeg:e1_deck_middle#input=rtsp_cuda#video=h264_1080p#audio=copy
   # Reolink Video Doorbell WiFi-W (main H.264 1920x2560 portrait @20).
   deck_doorbell: rtsp://127.0.0.1:8561/deck_doorbell
   # What protect-bridge (and so the AI Port) reads for the Doorbell Deck.
-  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_cuda#video=h264_2048p#audio=copy
+  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_cuda0#video=h264_2048p#audio=copy
   # Scrypted: full stream = track_masterbed / track_annex (copy). HomeKit = these:
   # 2026-10-23 the cameras own sub stream (896x512 H.264 15fps), copied - was a
   # CPU decode of the 4K main + h264_sub360 encode (~0.65 core each).

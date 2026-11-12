@@ -271,6 +271,14 @@ class UnifiCamBase(metaclass=ABCMeta):
             " third of --stream-silence-limit or less)",
         )
         parser.add_argument(
+            "--stream-min-rate",
+            default=None,
+            type=float,
+            help="Bytes per second a stream's pipeline must write to count as"
+            " alive (default: any output). Set it above the audio bitrate so a"
+            " stream that lost its video track is restarted",
+        )
+        parser.add_argument(
             "--lo-decode-threads",
             default=2,
             type=int,
@@ -2370,6 +2378,40 @@ class UnifiCamBase(metaclass=ABCMeta):
             self.STREAM_WATCHDOG_INTERVAL_SEC
         )
 
+    # A pipeline that exits within STREAM_QUICK_EXIT_SEC of its start has no
+    # usable source (camera offline) or no listener (Protect closed the ingest
+    # socket). The first such exit restarts at once; repeats wait 1x, 2x, 4x
+    # the watchdog interval, capped. A request from Protect still spawns
+    # immediately, so this only thins out restarts nobody is waiting for.
+    STREAM_QUICK_EXIT_SEC = 30
+    STREAM_RESTART_BACKOFF_MAX_SEC = 30
+
+    def _min_rate(self) -> float:
+        return getattr(self.args, "stream_min_rate", None) or 0.0
+
+    def _restart_wait(
+        self, stream_index: str, handle: subprocess.Popen
+    ) -> tuple[float, bool]:
+        """Seconds left before an exited pipeline may restart, and whether
+        this is the first time this exit was seen."""
+        mono = time.monotonic()
+        # __dict__: tests build bare instances without __init__.
+        state = self.__dict__.setdefault("_restart_backoff", {})
+        entry = state.get(stream_index)
+        if entry and entry["pid"] == handle.pid:
+            return entry["due"] - mono, False
+        started = self.__dict__.get("_stream_started", {}).get(stream_index)
+        quick = started is not None and mono - started < self.STREAM_QUICK_EXIT_SEC
+        fails = (entry["fails"] if entry else 0) + 1 if quick else 0
+        wait = 0.0
+        if fails > 1:
+            wait = min(
+                self.STREAM_RESTART_BACKOFF_MAX_SEC,
+                self._watchdog_interval() * 2 ** (fails - 2),
+            )
+        state[stream_index] = {"pid": handle.pid, "fails": fails, "due": mono + wait}
+        return wait, True
+
     async def _watch_streams(self) -> None:
         progress: dict[str, tuple[int, float]] = {}
         try:
@@ -2389,6 +2431,15 @@ class UnifiCamBase(metaclass=ABCMeta):
         for stream_index, handle in list(self._ffmpeg_handles.items()):
             meta = self._stream_meta.get(stream_index)
             if handle.poll() is not None:
+                wait, first = self._restart_wait(stream_index, handle)
+                if wait > 0:
+                    if first:
+                        self.logger.warning(
+                            f"Stream {stream_index} pipeline exited again"
+                            f" (rc={handle.returncode}); restarting in"
+                            f" {int(wait)}s"
+                        )
+                    continue
                 self.logger.warning(
                     f"Stream {stream_index} pipeline exited"
                     f" (rc={handle.returncode}); restarting"
@@ -2404,13 +2455,20 @@ class UnifiCamBase(metaclass=ABCMeta):
             if prev is None or prev[0] != handle.pid:
                 progress[stream_index] = (handle.pid, produced, now)
                 continue
-            if produced > prev[1]:
+            silent_for = now - prev[2]
+            # With --stream-min-rate a trickle (audio only, a wedged encoder)
+            # counts as silence; without it any new byte is progress.
+            if produced - prev[1] > self._min_rate() * silent_for:
                 progress[stream_index] = (handle.pid, produced, now)
                 continue
-            silent_for = now - prev[2]
             if silent_for >= self._silence_limit():
+                what = (
+                    f"wrote under {int(self._min_rate())} B/s"
+                    if produced > prev[1]
+                    else "produced no output"
+                )
                 self.logger.warning(
-                    f"Stream {stream_index} produced no output for"
+                    f"Stream {stream_index} {what} for"
                     f" {int(silent_for)}s; forcing restart"
                 )
                 progress.pop(stream_index, None)

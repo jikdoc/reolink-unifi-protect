@@ -1,18 +1,18 @@
-# Homelab: Reolink cameras -> UniFi Protect 7.3.70 on the UNVR, from CT 318
-# "protect-bridge" on pvemed.
+# Homelab: Reolink cameras -> UniFi Protect on the UNVR, from CT 319
+# "protect-bridge" on pvebig (two NVIDIA RTX PRO 4000; moved from the Intel
+# iGPU in CT 318 on pvemed 2026-11-02).
 #
-# ONE STREAM PER CAMERA (house rule): the relay (go2rtc) pulls each camera's
-# MAIN stream once; every Protect channel reads from the relay. video1 passes
-# the main stream through untouched (H.265); video2/3 are cut from it
-# (--lo-h265-transcode --lo-scale): decoded and scaled on the CPU
-# (--lo-decode cpu, ~0.4 core per camera) and only encoded on the i7-12700 iGPU,
-# because the iGPU's HEVC decoder hung on these streams (2026-10-19, on both
-# the xe and i915 drivers). To try the iGPU again (e.g. after the garage fiber),
-# drop --lo-decode cpu and watch `dmesg | grep "GPU HANG"` on pvemed. The camera's sub stream is
-# never used. Measured 2026-10-19 on Wi-Fi Elite Sophia: main alone 399/400
-# frames, main + sub together only 249/400, so Protect timed out every channel.
-# The Baichuan box sidecar is off for the same reason (it opens a second video
-# stream during detections); detections come from the camera's push channel.
+# The relay (go2rtc) pulls each camera once, mostly through reostream
+# (Baichuan); every Protect channel reads from the relay. video1 passes the
+# main stream through untouched; video2/3 are either cut from the main on the
+# GPU (--lo-shared --lo-scale: hevc_cuvid -> scale_cuda -> hevc_nvenc, one
+# ffmpeg for both) or re-encoded from the camera's H.264 sub.
+# Use hevc_cuvid, not the native decoder with -hwaccel cuda: the native one
+# fell out of hardware on two cameras. Intel iGPU HEVC decode hung the GPU on
+# these streams (2026-10-19/22), which is why this left pvemed.
+# Main + sub from one camera is fine on a clean link (re-tested 2026-10-29);
+# avoid it only on weak Wi-Fi. The Baichuan box sidecar stays off; detections
+# come from the camera's push channel.
 #
 # The cameras serve their API on plain HTTP only (HTTPS off), and reject
 # user/password-in-URL logins because the password has special characters:
@@ -31,7 +31,8 @@
 # Never adopt a camera twice: remove its third-party adoption in Protect and
 # exclude its MAC (and the virtual MAC) in onvif-recorder first.
 #
-#   cd /opt/rup/deploy/protect-bridge && docker compose up -d --build
+# Image: docker build -t protect-bridge:nvenc -f Dockerfile.vaapi /opt/rup
+# (Debian's ffmpeg already has cuvid/nvenc). Tag the old image first for rollback.
 
 x-proxy: &proxy
   image: protect-bridge:nvenc
@@ -74,7 +75,10 @@ services:
       - ./reostream:/data
 
   relay:
-    # -hardware variant: Debian 13 with Intel iHD for the VAAPI *_sub transcodes.
+    # -hardware variant (ffmpeg with cuvid/nvenc). Stay on 1.9.9: with 1.9.15
+    # (tried 2026-11-12) Protect never accepted the channels that copy a relay
+    # transcode (Doorbell Deck, E1 Server/Deck Middle lo) and re-requested them
+    # every ~16 s; pass-through streams were fine. Rolled back after 13 min.
     image: alexxit/go2rtc:1.9.9-hardware@sha256:7d78c5843ca6bbe6bdd1f3cfd5a7708c7a6a30817c2996113de000cf09fcd741
     container_name: protect-bridge-relay
     restart: unless-stopped
@@ -157,12 +161,9 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
-      # One ffmpeg for video2 + video3 (one CPU decode instead of two).
+      # One ffmpeg for video2 + video3 (one decode instead of two).
       - --lo-shared
       - --lo-scale
       - --hw-backend
@@ -177,7 +178,8 @@ services:
       - "576"
       - --lo-fps
       - "20"
-      # MoCA link: shorter recording gaps per stall (default 45 s / 15 s), 2026-10-22.
+      # Shorter recording gaps per stall (default 45 s / 15 s). Kept after the
+      # fiber (2026-11-12): still fires a few times a week on real stalls.
       - --stream-silence-limit
       - "20"
       - --stream-watchdog-interval
@@ -246,22 +248,21 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
-      # 2026-10-23: video2/3 read the camera's H.264 sub (relay back_gate_sub, already
-      # 1920x720) and decode it on the iGPU (H.264 only - HEVC iGPU decode hangs);
-      # was --lo-scale + --lo-decode cpu of the H.265 main (~0.6 core).
+      # video2/3 read the camera's H.264 sub (relay back_gate_sub, already 1920x720).
+      # 2026-11-12: one ffmpeg for video2 + video3. The 2026-10-22 try looped on
+      # EPIPE after MoCA stalls; the MoCA leg is gone. Rollback: drop --lo-shared.
+      - --lo-shared
       - --hw-backend
       - nvenc
       - --nv-gpu
       - "1"
       - --lo-source-codec
       - h264
-      # 15 s (10-19) and 45 s (10-22) both gave ~30 restarts/h on the MoCA link;
-      # 45 s only made each gap longer. 20 s from 2026-10-22. Revisit after the fiber.
+      # Revisited 2026-11-12 after the fiber: kept at 20 s. It still fires about
+      # once a day and each firing is a real stall that the default (45 s) would
+      # leave recording nothing for longer.
       - --stream-silence-limit
       - "20"
       - --stream-watchdog-interval
@@ -334,13 +335,10 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
       # video2/3 read the camera's H.264 sub (relay duo_generator_sub, 1536x576) and
-      # decode it on the iGPU (H.264 only: iGPU HEVC decode hangs). No AI Port (user).
+      # decode it with h264_cuvid. No AI Port (user).
       - --hw-backend
       - nvenc
       - --nv-gpu
@@ -419,13 +417,10 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
       # video2/3 read the camera's H.264 sub (relay elite_guest_bed_sub, 1920x576) and
-      # decode it on the iGPU (H.264 only: iGPU HEVC decode hangs).
+      # decode it with h264_cuvid.
       - --hw-backend
       - nvenc
       - --nv-gpu
@@ -480,7 +475,8 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_masterbed"
-      - --ptz
+      # No --ptz on TrackMix: Protect's live view goes black after a move
+      # (2026-10-25); the camera's own auto-tracking is used instead.
       - --reolink-ai-host
       - "${MB_IP}"
       - --reolink-ai-user
@@ -506,9 +502,6 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
       # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
@@ -520,8 +513,6 @@ services:
       - "0"
       - --lo-source-codec
       - hevc
-      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
-      # cameras; back on CPU decode.
       - --lo-width
       - "1920"
       - --lo-height
@@ -579,6 +570,10 @@ services:
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      # Restart a channel that writes less than video would (audio only is
+      # ~16 kB/s summed over the pipeline; the smallest video channel ~480 kB/s).
+      - --stream-min-rate
+      - "32000"
       - --hi-codec
       - h264
       - --hi-width
@@ -632,7 +627,8 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_annex"
-      - --ptz
+      # No --ptz on TrackMix: Protect's live view goes black after a move
+      # (2026-10-25); the camera's own auto-tracking is used instead.
       - --reolink-ai-host
       - "${TA_IP}"
       - --reolink-ai-user
@@ -658,9 +654,6 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
       # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
@@ -672,8 +665,6 @@ services:
       - "1"
       - --lo-source-codec
       - hevc
-      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
-      # cameras; back on CPU decode.
       - --lo-width
       - "1920"
       - --lo-height
@@ -681,8 +672,8 @@ services:
       - --lo-fps
       - "25"
 
-  # Reolink E1 Zoom "E1 Forest" (clean path), main 2560x1920@20 passed through
-  # untouched on all three channels. Plain G5 Pro, no PTZ (2026-10-22 decision).
+  # Reolink TrackMix WiFi "Track Sophia" (front of garage, fiber since 2026-10-29),
+  # same setup as Track Master Bed. Adopted 2026-10-26.
   track-sophia:
     <<: *proxy
     container_name: protect-bridge-track-sophia
@@ -713,7 +704,8 @@ services:
       - rtsp
       - -s
       - "rtsp://${RELAY_USER}:${RELAY_PASS}@127.0.0.1:8554/track_sophia"
-      - --ptz
+      # No --ptz on TrackMix: Protect's live view goes black after a move
+      # (2026-10-25); the camera's own auto-tracking is used instead.
       - --reolink-ai-host
       - "${SO_IP}"
       - --reolink-ai-user
@@ -739,9 +731,6 @@ services:
       - --lo-codec
       - h265
       - --lo-h265-transcode
-      # Low-power (VDENC) encode: keeps the lo encodes off the iGPU render
-      # engine (RCS hit 97% with 6 cameras on CPU decode, 2026-10-22). Injected
-      # through the bitrate value because the encoder args are fixed in code.
       - --lo-transcode-bitrate
       - "1M"
       # video2/3 decode the 4K main on NVDEC (one ffmpeg) and scale to 1080p (2026-11-02).
@@ -753,8 +742,6 @@ services:
       - "0"
       - --lo-source-codec
       - hevc
-      # iGPU decode test 2026-10-22 ended in a GPU HANG (dec0 hevc_qsv) with 4 such
-      # cameras; back on CPU decode.
       - --lo-width
       - "1920"
       - --lo-height
@@ -887,7 +874,7 @@ services:
       - "20"
 
   # Reolink E1 Outdoor Pro "E1 Server" (clean path), main H.265 3840x2160@20,
-  # iGPU decode for the lo channels like the TrackMix cameras.
+  # set to 2560x1440 H.264 @25 until the replacement AI Port arrives (2026-11-02).
   e1-server:
     <<: *proxy
     container_name: protect-bridge-e1-server
@@ -932,6 +919,10 @@ services:
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      # Restart a channel that writes less than video would (audio only is
+      # ~16 kB/s summed over the pipeline; the smallest video channel ~480 kB/s).
+      - --stream-min-rate
+      - "32000"
       - --hi-codec
       - h264
       - --hi-width
@@ -943,7 +934,7 @@ services:
       - --lo-codec
       - h264
       # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
-      # copy the relay's e1_server_lo (iGPU decode+scale+encode). Was --lo-h265-transcode
+      # copy the relay's e1_server_lo (GPU decode+scale+encode). Was --lo-h265-transcode
       # with --lo-shared CPU decode (~0.45 core).
       - --lo-width
       - "1920"
@@ -954,7 +945,7 @@ services:
 
 
   # Reolink E1 Outdoor Pro "E1 Deck Middle" (clean path), main H.265 3840x2160@20,
-  # iGPU decode for the lo channels like the TrackMix cameras.
+  # set to 2560x1440 H.264 @25 until the replacement AI Port arrives (2026-11-02).
   e1-deck-middle:
     <<: *proxy
     container_name: protect-bridge-e1-deck-middle
@@ -999,6 +990,10 @@ services:
       - --reolink-push-ai
       - --ffmpeg-args
       - "-c:v copy -ar 16000 -ac 1 -codec:a aac -b:a 32k"
+      # Restart a channel that writes less than video would (audio only is
+      # ~16 kB/s summed over the pipeline; the smallest video channel ~480 kB/s).
+      - --stream-min-rate
+      - "32000"
       - --hi-codec
       - h264
       - --hi-width
@@ -1010,7 +1005,7 @@ services:
       - --lo-codec
       - h264
       # 2026-10-23: main is H.264 (set via API, the app has no codec option), so video2/3
-      # copy the relay's e1_deck_middle_lo (iGPU decode+scale+encode). Was --lo-h265-transcode
+      # copy the relay's e1_deck_middle_lo (GPU decode+scale+encode). Was --lo-h265-transcode
       # with --lo-shared CPU decode (~0.45 core).
       - --lo-width
       - "1920"

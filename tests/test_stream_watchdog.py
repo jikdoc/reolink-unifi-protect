@@ -238,3 +238,69 @@ async def test_silence_limit_can_be_shortened_per_camera(cam, monkeypatch):
 def test_watchdog_defaults_are_unchanged(cam):
     assert cam._silence_limit() == 45
     assert cam._watchdog_interval() == 15
+
+
+# --- minimum rate and restart backoff ---------------------------------------
+
+
+async def test_trickle_counts_as_silence_with_min_rate(cam, monkeypatch):
+    # Audio-only output (a few kB/s) keeps the byte counter moving; with
+    # --stream-min-rate it is still treated as a dead stream.
+    idx = arm(cam, bytes_out=0)
+    cam.args.stream_min_rate = 32000.0
+    monkeypatch.setattr(cam, "_stream_output_bytes", lambda i: cam._output.get(i))
+    progress = {}
+    for n in range(5):
+        cam._output[idx] = n * 15 * 4000  # 4 kB/s
+        await cam._watchdog_tick(progress, now=n * 15.0)
+    assert cam._test_calls["stop"] == [idx]
+
+
+async def test_video_rate_passes_min_rate(cam, monkeypatch):
+    idx = arm(cam, bytes_out=0)
+    cam.args.stream_min_rate = 32000.0
+    monkeypatch.setattr(cam, "_stream_output_bytes", lambda i: cam._output.get(i))
+    progress = {}
+    for n in range(6):
+        cam._output[idx] = n * 15 * 400_000
+        await cam._watchdog_tick(progress, now=n * 15.0)
+    assert cam._test_calls["stop"] == []
+
+
+async def test_repeated_quick_exits_back_off(cam, monkeypatch):
+    import unifi.cams.base as base
+
+    clock = [1000.0]
+    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cam, "_stream_output_bytes", lambda i: None)
+    idx = "video2"
+    cam._stream_meta[idx] = ("s", ("10.0.0.1", 7550))
+    pid = [100]
+
+    def die():
+        # A pipeline that was started just now and has already exited.
+        pid[0] += 1
+        cam._ffmpeg_handles[idx] = FakeHandle(rc=224, pid=pid[0])
+        cam.__dict__.setdefault("_stream_started", {})[idx] = clock[0]
+
+    die()
+    clock[0] += 15
+    await cam._watchdog_tick({}, now=0.0)
+    assert len(cam._test_calls["start"]) == 1  # first exit: at once
+
+    die()
+    clock[0] += 15
+    await cam._watchdog_tick({}, now=0.0)
+    assert len(cam._test_calls["start"]) == 1  # second: wait one interval
+    clock[0] += 14
+    await cam._watchdog_tick({}, now=0.0)
+    assert len(cam._test_calls["start"]) == 1
+    clock[0] += 2
+    await cam._watchdog_tick({}, now=0.0)
+    assert len(cam._test_calls["start"]) == 2
+
+    # A pipeline that ran for a while resets the count.
+    die()
+    clock[0] += 300
+    await cam._watchdog_tick({}, now=0.0)
+    assert len(cam._test_calls["start"]) == 3
