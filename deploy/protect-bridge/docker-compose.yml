@@ -75,11 +75,10 @@ services:
       - ./reostream:/data
 
   relay:
-    # -hardware variant (ffmpeg with cuvid/nvenc). Stay on 1.9.9: with 1.9.15
-    # (tried 2026-11-12) Protect never accepted the channels that copy a relay
-    # transcode (Doorbell Deck, E1 Server/Deck Middle lo) and re-requested them
-    # every ~16 s; pass-through streams were fine. Rolled back after 13 min.
-    image: alexxit/go2rtc:1.9.9-hardware@sha256:7d78c5843ca6bbe6bdd1f3cfd5a7708c7a6a30817c2996113de000cf09fcd741
+    # -hardware variant (ffmpeg with cuvid/nvenc). 1.9.15 since 2026-11-12. Its first
+    # try that day failed because relay transcodes used #audio=copy (see go2rtc.yaml).
+    # Rollback: alexxit/go2rtc:1.9.9-hardware@sha256:7d78c5843ca6bbe6bdd1f3cfd5a7708c7a6a30817c2996113de000cf09fcd741
+    image: alexxit/go2rtc:1.9.15-hardware
     container_name: protect-bridge-relay
     restart: unless-stopped
     network_mode: host

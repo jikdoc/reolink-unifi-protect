@@ -71,13 +71,17 @@ streams:
   e1_playroom: rtsp://127.0.0.1:8561/e1_playroom
   e1_server: rtsp://127.0.0.1:8561/e1_server
   e1_deck_middle: rtsp://127.0.0.1:8561/e1_deck_middle
+  # Transcodes re-encode the audio (#audio=aac/16000), never #audio=copy: on go2rtc
+  # 1.9.15 a copied audio track is announced but carries no packets, so the proxy's
+  # ffmpeg waits for audio forever and Protect re-requests the channel every ~16 s
+  # (found 2026-11-12; the camera streams themselves pass audio fine).
   # Protect video2/video3 for the E1 Outdoor Pros: GPU decode + scale + encode of the H.264 main.
-  e1_server_lo: ffmpeg:e1_server#input=rtsp_cuda#video=h264_1080p#audio=copy
-  e1_deck_middle_lo: ffmpeg:e1_deck_middle#input=rtsp_cuda#video=h264_1080p#audio=copy
+  e1_server_lo: ffmpeg:e1_server#input=rtsp_cuda#video=h264_1080p#audio=aac/16000
+  e1_deck_middle_lo: ffmpeg:e1_deck_middle#input=rtsp_cuda#video=h264_1080p#audio=aac/16000
   # Reolink Video Doorbell WiFi-W (main H.264 1920x2560 portrait @20).
   deck_doorbell: rtsp://127.0.0.1:8561/deck_doorbell
   # What protect-bridge (and so the AI Port) reads for the Doorbell Deck.
-  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_cuda0#video=h264_2048p#audio=copy
+  deck_doorbell_hq: ffmpeg:deck_doorbell#input=rtsp_cuda0#video=h264_2048p#audio=aac/16000
   # Scrypted: full stream = track_masterbed / track_annex (copy). HomeKit = these:
   # 2026-10-23 the cameras own sub stream (896x512 H.264 15fps), copied - was a
   # CPU decode of the 4K main + h264_sub360 encode (~0.65 core each).
