@@ -317,3 +317,221 @@ async def test_watchdog_rebaselines_a_replaced_pipeline(env, monkeypatch):
     out["video3"] = 900_000
     await cam._watchdog_tick(progress, now=cam.STREAM_SILENCE_LIMIT_SEC + 20)
     assert restarts == []
+
+
+# --- EPIPE recovery ---------------------------------------------------------
+# rc 224 = Protect closed an ingest socket: both channels' cached grants are
+# void, so the bridge waits for fresh requests instead of respawning.
+
+
+class FakeWS:
+    def __init__(self, clock=None):
+        self.closed = 0
+        self.at = []
+        self._clock = clock
+
+    async def close(self):
+        self.closed += 1
+        if self._clock is not None:
+            self.at.append(self._clock[0])
+
+
+@pytest.fixture
+def epipe(env, monkeypatch):
+    import unifi.cams.base as base
+
+    cam, spawned, killed = env
+    clock = [1000.0]
+    monkeypatch.setattr(base.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cam, "_stream_output_bytes", lambda i: None)
+    cam._session = FakeWS(clock)
+    return cam, spawned, killed, clock
+
+
+async def start_both(cam, n2="MED", n3="LOW"):
+    await cam.start_video_stream("video2", n2, DEST2)
+    await cam.start_video_stream("video3", n3, DEST3)
+
+
+async def test_epipe_exit_is_not_blindly_respawned(epipe):
+    cam, spawned, killed, clock = epipe
+    await start_both(cam)
+    assert len(spawned) == 2
+    dead = spawned[-1][1]
+    dead._rc = 224
+    for _ in range(4):
+        clock[0] += 15
+        await cam._watchdog_tick({}, now=clock[0])
+    assert len(spawned) == 2
+    assert "video2" not in cam._ffmpeg_handles
+    assert "video3" not in cam._ffmpeg_handles
+    assert "video2" not in cam._stream_meta
+    assert "video3" not in cam._stream_meta
+    assert dead.pid in killed
+
+
+async def test_broken_pipe_loop_ends_at_the_first_rerequest(epipe):
+    cam, spawned, killed, clock = epipe
+    await start_both(cam)
+    t0 = clock[0]
+    progress = {}
+    for i in range(20):
+        clock[0] = t0 + 15 * (i + 1)
+        for cmd, h, _ in spawned:
+            if h.poll() is None and "streamName=LOW" in cmd:
+                h._rc = 224
+        await cam._watchdog_tick(progress, now=clock[0])
+        if i == 0:
+            clock[0] = t0 + 16
+            await cam.start_video_stream("video2", "MED2", DEST2)
+    cmd, h, _ = spawned[-1]
+    assert cam._ffmpeg_handles["video2"] is h and h.poll() is None
+    assert "streamName=MED2" in cmd and "streamName=LOW" not in cmd
+    assert len(spawned) == 3
+
+
+async def test_rerequest_before_the_tick_drops_the_stale_peer(epipe):
+    cam, spawned, killed, clock = epipe
+    await start_both(cam)
+    dead = spawned[-1][1]
+    dead._rc = 224
+    await cam.start_video_stream("video2", "MED2", DEST2)
+    cmd, h, _ = spawned[-1]
+    assert len(spawned) == 3
+    assert "streamName=MED2" in cmd and "streamName=LOW" not in cmd
+    assert "video3" in cam._lo_state()["waiting"]
+    assert "video2" not in cam._lo_state()["waiting"]
+    assert "video3" not in cam._stream_meta
+    assert dead.pid in killed
+
+
+async def test_peer_rejoins_on_its_own_rerequest(epipe):
+    cam, spawned, killed, clock = epipe
+    await start_both(cam)
+    spawned[-1][1]._rc = 224
+    await cam.start_video_stream("video2", "MED2", DEST2)
+    solo = spawned[-1][1]
+    await cam.start_video_stream("video3", "LOW2", DEST3)
+    assert len(spawned) == 4
+    cmd, h, _ = spawned[-1]
+    assert "streamName=MED2" in cmd and "streamName=LOW2" in cmd
+    assert cam._ffmpeg_handles["video2"] is h and cam._ffmpeg_handles["video3"] is h
+    assert solo.pid in killed
+    assert cam._lo_state()["waiting"] == {}
+
+
+async def test_non_epipe_exit_still_respawns_and_sweeps(epipe):
+    cam, spawned, killed, clock = epipe
+    await start_both(cam)
+    dead = spawned[-1][1]
+    dead._rc = 1
+    clock[0] += 15
+    await cam._watchdog_tick({}, now=clock[0])
+    await asyncio.sleep(0)
+    assert len(spawned) == 3
+    assert dead.pid in killed
+    cmd = spawned[-1][0]
+    assert "streamName=MED" in cmd and "streamName=LOW" in cmd
+
+
+async def test_stuck_lo_reconnects_once_then_backs_off(epipe):
+    cam, spawned, killed, clock = epipe
+    ws = cam._session
+    await start_both(cam)
+    spawned[-1][1]._rc = 224
+    t0 = clock[0]
+    await cam._watchdog_tick({}, now=t0)
+    clock[0] = t0 + 89
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 0
+    clock[0] = t0 + 90
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 1
+    cam.close_streams()  # Core's reconnect runs cam.close()
+    await start_both(cam)  # Protect re-requests on the new connection
+    spawned[-1][1]._rc = 224  # and the grants are rejected again
+    await cam._watchdog_tick({}, now=clock[0])
+    nxt = cam._lo_state()["next_reconnect"]
+    assert nxt > clock[0] + 90
+    clock[0] = nxt - 1
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 1
+    clock[0] = nxt
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 2
+
+
+async def test_rerequests_that_keep_hitting_epipe_still_escalate(epipe):
+    cam, spawned, killed, clock = epipe
+    ws = cam._session
+    first_bad = None
+    for _ in range(10):
+        clock[0] += 16
+        await start_both(cam)
+        if first_bad is None:
+            first_bad = clock[0]
+        for _, h, _ in spawned:
+            if h.poll() is None:
+                h._rc = 224
+        await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 1
+    assert ws.at[0] - first_bad >= 90
+
+
+async def test_healthy_lo_clears_the_stuck_state(epipe):
+    cam, spawned, killed, clock = epipe
+    ws = cam._session
+    await start_both(cam)
+    spawned[-1][1]._rc = 224
+    await cam._watchdog_tick({}, now=clock[0])
+    assert cam._lo_state()["bad_since"] is not None
+    await start_both(cam)
+    clock[0] += 61
+    await cam._watchdog_tick({}, now=clock[0])
+    st = cam._lo_state()
+    assert st["bad_since"] is None and st["reconnects"] == 0
+    clock[0] += 300
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 0
+
+
+async def test_protect_stop_of_waiting_channels_cancels_escalation(epipe):
+    cam, spawned, killed, clock = epipe
+    ws = cam._session
+    await start_both(cam)
+    spawned[-1][1]._rc = 224
+    await cam._watchdog_tick({}, now=clock[0])
+    cam.stop_video_stream("video2")
+    cam.stop_video_stream("video3")
+    assert cam._lo_state()["waiting"] == {}
+    clock[0] += 300
+    await cam._watchdog_tick({}, now=clock[0])
+    assert ws.closed == 0
+
+
+async def test_epipe_on_non_shared_or_video1_is_unchanged(epipe):
+    cam, spawned, killed, clock = epipe
+    # video1 on a shared camera
+    await cam.start_video_stream("video1", "HI", ("10.0.0.6", 7552))
+    spawned[-1][1]._rc = 224
+    clock[0] += 15
+    await cam._watchdog_tick({}, now=clock[0])
+    assert len(spawned) == 2
+    assert killed == []
+    # lo channel without --lo-shared
+    cam.args.lo_shared = False
+    await cam.start_video_stream("video2", "MED", DEST2)
+    spawned[-1][1]._rc = 224
+    clock[0] += 15
+    await cam._watchdog_tick({}, now=clock[0])
+    assert len(spawned) == 4
+    assert killed == []
+    assert cam._lo_state()["waiting"] == {}
+
+
+def test_leftover_sweep_skips_a_pid_owned_by_a_live_pipeline(env):
+    cam, spawned, killed = env
+    live, dead = FakeHandle(pid=77), FakeHandle(pid=77, rc=1)
+    cam._ffmpeg_handles["video2"] = live
+    cam._kill_leftovers(dead)
+    assert killed == []

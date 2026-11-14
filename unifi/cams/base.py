@@ -2134,6 +2134,14 @@ class UnifiCamBase(metaclass=ABCMeta):
         self, stream_index: str, stream_name: str, destination: tuple[str, int]
     ):
         if self._lo_shared(stream_index):
+            old = self._ffmpeg_handles.get(stream_index)
+            if (
+                old is not None
+                and old.poll() is not None
+                and old.returncode == self.FFMPEG_EPIPE_RC
+            ):
+                self._lo_drop_epipe(old)  # voids the peer's cached grant too
+            self._lo_state()["waiting"].pop(stream_index, None)
             self._stream_meta[stream_index] = (stream_name, destination)
             self._lo_shared_source = await self.get_stream_source(stream_index)
             handle = self._ffmpeg_handles.get(stream_index)
@@ -2275,6 +2283,11 @@ class UnifiCamBase(metaclass=ABCMeta):
         for h in handles_to_kill:
             self._kill_handle(h)
 
+        for idx in lo_indices:
+            h = self._ffmpeg_handles.get(idx)
+            if h is not None and h not in handles_to_kill and h.poll() is not None:
+                self._kill_leftovers(h)
+
         source = getattr(self, "_lo_shared_source", None)
         if not source:
             return
@@ -2310,6 +2323,7 @@ class UnifiCamBase(metaclass=ABCMeta):
 
     def stop_video_stream(self, stream_index: str):
         if self._lo_shared(stream_index):
+            self._lo_state()["waiting"].pop(stream_index, None)
             handle = self._ffmpeg_handles.pop(stream_index, None)
             self._stream_meta.pop(stream_index, None)
             if handle is None:
@@ -2350,6 +2364,9 @@ class UnifiCamBase(metaclass=ABCMeta):
     def close_streams(self):
         for stream in list(self._ffmpeg_handles):
             self.stop_video_stream(stream)
+        st = self._lo_state()
+        st["waiting"].clear()
+        st["bad_since"] = None
 
     # --- stream watchdog -------------------------------------------------
     # ffmpeg feeds Protect through a shell pipeline
@@ -2385,6 +2402,85 @@ class UnifiCamBase(metaclass=ABCMeta):
     # immediately, so this only thins out restarts nobody is waiting for.
     STREAM_QUICK_EXIT_SEC = 30
     STREAM_RESTART_BACKOFF_MAX_SEC = 30
+
+    # Shared lo pipeline (video2+video3): rc 224 means Protect closed one of
+    # its ingest sockets, so the cached grants of both channels are void.
+    FFMPEG_EPIPE_RC = 224  # AVERROR(EPIPE) & 0xFF
+    LO_INDICES = ("video2", "video3")
+    STREAM_LO_STUCK_SEC = 90
+    STREAM_LO_HEALTHY_SEC = 60
+    STREAM_RECONNECT_BACKOFF_MAX_SEC = 900
+
+    def _lo_state(self) -> dict:
+        # __dict__: tests build bare instances without __init__.
+        return self.__dict__.setdefault(
+            "_lo_recovery",
+            {"waiting": {}, "bad_since": None, "reconnects": 0, "next_reconnect": 0.0},
+        )
+
+    def _kill_leftovers(self, handle) -> None:
+        """SIGKILL the process group of a dead pipeline: the nc tails are
+        bash process substitutions and outlive ffmpeg."""
+        if getattr(handle, "_swept", False):
+            return
+        handle._swept = True
+        if any(
+            h is not handle and h.pid == handle.pid and h.poll() is None
+            for h in self._ffmpeg_handles.values()
+        ):
+            return  # pid reused by a live pipeline
+        try:
+            os.killpg(handle.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def _lo_drop_epipe(self, handle) -> None:
+        st, mono = self._lo_state(), time.monotonic()
+        dropped = [i for i in self.LO_INDICES if self._ffmpeg_handles.get(i) is handle]
+        for i in dropped:
+            del self._ffmpeg_handles[i]
+            self._stream_meta.pop(i, None)
+            st["waiting"][i] = mono
+        if st["bad_since"] is None:
+            st["bad_since"] = mono
+        self._kill_leftovers(handle)
+        self.logger.warning(
+            f"Protect closed an ingest socket of {'+'.join(dropped)} (rc=224);"
+            " waiting for Protect to re-request"
+        )
+
+    async def _lo_check_stuck(self) -> None:
+        st = self._lo_state()
+        if st["bad_since"] is None:
+            return
+        mono = time.monotonic()
+        started = self.__dict__.get("_stream_started", {})
+        lo = {i: h for i, h in self._ffmpeg_handles.items() if self._lo_shared(i)}
+        if not st["waiting"] and all(
+            h.poll() is None
+            and mono - started.get(i, mono) >= self.STREAM_LO_HEALTHY_SEC
+            for i, h in lo.items()
+        ):  # healthy again, or Protect wants no lo channel
+            st.update(bad_since=None, reconnects=0, next_reconnect=0.0)
+            return
+        if (
+            mono - st["bad_since"] < self.STREAM_LO_STUCK_SEC
+            or mono < st["next_reconnect"]
+        ):
+            return
+        st["reconnects"] += 1
+        st["next_reconnect"] = mono + min(
+            self.STREAM_RECONNECT_BACKOFF_MAX_SEC,
+            self.STREAM_LO_STUCK_SEC * 2 ** st["reconnects"],
+        )
+        st["bad_since"] = None
+        self.logger.warning(
+            f"Lo channels stuck for {self.STREAM_LO_STUCK_SEC}s (waiting:"
+            f" {', '.join(st['waiting']) or 'none'}); reconnecting to Protect"
+        )
+        session = self.__dict__.get("_session")
+        if session is not None:
+            await session.close()  # _run's recv() raises -> Core reconnects
 
     def _min_rate(self) -> float:
         return getattr(self.args, "stream_min_rate", None) or 0.0
@@ -2429,8 +2525,17 @@ class UnifiCamBase(metaclass=ABCMeta):
     ) -> None:
         now = time.time() if now is None else now
         for stream_index, handle in list(self._ffmpeg_handles.items()):
+            if self._ffmpeg_handles.get(stream_index) is not handle:
+                continue  # replaced or dropped earlier in this tick (shared peer)
             meta = self._stream_meta.get(stream_index)
             if handle.poll() is not None:
+                if self._lo_shared(stream_index):
+                    if handle.returncode == self.FFMPEG_EPIPE_RC:
+                        self._lo_drop_epipe(handle)
+                        for i in self.LO_INDICES:
+                            progress.pop(i, None)
+                        continue
+                    self._kill_leftovers(handle)
                 wait, first = self._restart_wait(stream_index, handle)
                 if wait > 0:
                     if first:
@@ -2475,6 +2580,7 @@ class UnifiCamBase(metaclass=ABCMeta):
                 self.stop_video_stream(stream_index)
                 if meta:
                     await self.start_video_stream(stream_index, meta[0], meta[1])
+        await self._lo_check_stuck()
 
     def _stream_output_bytes(self, stream_index: str) -> Optional[int]:
         """Total bytes written by the pipeline for a stream, or None.
