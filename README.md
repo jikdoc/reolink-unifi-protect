@@ -21,7 +21,7 @@ modern-Protect work below was built on top of it here:
   startup, snapshot support without an extra RTSP session.
 
 Developed and verified against a **Reolink Elite Floodlight WiFi**
-(dual-lens 180°, 5120×1552 HEVC) and **UniFi Protect 7.1.87** on a UDM Pro.
+(dual-lens 180°, 5120×1552 HEVC) and **UniFi Protect 7.1.87** on a UNVR.
 Most of it is general: the H.265 framing, identity emulation, and smart-detect
 event pipeline apply to any RTSP camera; the AI sidecar applies to any recent
 Reolink with on-board detection.
